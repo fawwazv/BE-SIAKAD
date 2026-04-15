@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  // Baris 'url = env("DATABASE_URL")' dihapus dari sini
+  url      = env("DATABASE_URL")
 }
 
 model Role {

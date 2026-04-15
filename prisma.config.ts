@@ -6,6 +6,9 @@ import { config } from 'dotenv';
 config();
 
 export default defineConfig({
+  migrations: {
+    seed: 'node ./prisma/seed.js',
+  },
   datasource: {
     // Sekarang sistem pasti bisa menemukan URL dari Supabase
     url: process.env.DATABASE_URL as string,
