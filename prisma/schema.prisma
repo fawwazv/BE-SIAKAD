@@ -1,0 +1,24 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Baris 'url = env("DATABASE_URL")' dihapus dari sini
+}
+
+model Role {
+  id        Int    @id @default(autoincrement())
+  nama_role String @unique
+  users     User[]
+}
+
+model User {
+  id            String  @id @default(uuid())
+  email         String  @unique
+  password_hash String
+  role_id       Int
+  status_aktif  Boolean @default(true)
+  role          Role    @relation(fields: [role_id], references: [id])
+}
