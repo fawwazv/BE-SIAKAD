@@ -1,4 +1,9 @@
 // prisma/schema.prisma
+// ═══════════════════════════════════════════════
+// SIAKAD SMAN 1 Cikalong — Database Schema
+// PostgreSQL (Supabase) via Prisma ORM
+// ═══════════════════════════════════════════════
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -6,19 +11,294 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
+// ─── ROLE ───────────────────────────────────────
 model Role {
   id        Int    @id @default(autoincrement())
   nama_role String @unique
   users     User[]
 }
 
+// ─── USER (Akun Login) ──────────────────────────
 model User {
-  id            String  @id @default(uuid())
-  email         String  @unique
+  id            String   @id @default(uuid())
+  email         String   @unique
   password_hash String
+  nama_lengkap  String   @default("")
+  nomor_induk   String?  // NIP untuk guru, NISN untuk siswa
   role_id       Int
-  status_aktif  Boolean @default(true)
-  role          Role    @relation(fields: [role_id], references: [id])
+  status_aktif  Boolean  @default(true)
+  avatar_url    String?
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  role          Role     @relation(fields: [role_id], references: [id])
+  profile       UserProfile?
+
+  // Relasi guru
+  guru_mapel       GuruMapel[]
+  jadwal_mengajar  JadwalPelajaran[]
+  wali_master_kelas MasterKelas[] @relation("WaliKelasRelation")
+  wali_rombel      Rombel[]      @relation("WaliKelasRombelRelation")
+
+  // Relasi siswa
+  rombel_siswa  RombelSiswa[]
+  kehadiran     Kehadiran[]
+  nilai         Nilai[]
+
+  // Relasi catatan akademik
+  catatan_sebagai_siswa CatatanAkademik[] @relation("CatatanSiswaRelation")
+  catatan_sebagai_wali  CatatanAkademik[] @relation("CatatanWaliRelation")
+}
+
+// ─── USER PROFILE (Biodata Lengkap) ─────────────
+model UserProfile {
+  id              String  @id @default(uuid())
+  user_id         String  @unique
+  jenis_kelamin   String? // "L" atau "P"
+  tanggal_lahir   String?
+  tempat_lahir    String?
+  agama           String?
+  nik             String?
+  nama_ibu_kandung String?
+  status_perkawinan String?
+
+  // Alamat
+  provinsi        String?
+  kota_kabupaten  String?
+  kecamatan       String?
+  kelurahan       String?
+  detail_alamat   String?
+  rt              String?
+  rw              String?
+  kode_pos        String?
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+// ─── TAHUN AJARAN ──────────────────────────────
+model TahunAjaran {
+  id          String  @id @default(uuid())
+  kode        String  @unique // "2026/2027"
+  deskripsi   String
+  is_active   Boolean @default(false)
+
+  semester    Semester[]
+  rombel      Rombel[]
+}
+
+// ─── SEMESTER ──────────────────────────────────
+model Semester {
+  id              String  @id @default(uuid())
+  nama            String  // "Semester Ganjil" / "Semester Genap"
+  tahun_ajaran_id String
+  is_active       Boolean @default(false)
+
+  tahun_ajaran TahunAjaran @relation(fields: [tahun_ajaran_id], references: [id], onDelete: Cascade)
+  nilai        Nilai[]
+  catatan_akademik CatatanAkademik[]
+
+  @@unique([nama, tahun_ajaran_id])
+}
+
+// ─── RUANG KELAS ───────────────────────────────
+model RuangKelas {
+  id        String @id @default(uuid())
+  kode      String @unique // "R-101"
+  gedung    String
+  kapasitas Int
+
+  master_kelas MasterKelas[]
+  jadwal       JadwalPelajaran[]
+  rombel       Rombel[]
+}
+
+// ─── MASTER KELAS ──────────────────────────────
+model MasterKelas {
+  id              String @id @default(uuid())
+  nama            String // "X IPA 1"
+  tingkat         String // "Kelas 10", "Kelas 11", "Kelas 12"
+  wali_kelas_id   String?
+  ruang_kelas_id  String?
+
+  wali_kelas  User?       @relation("WaliKelasRelation", fields: [wali_kelas_id], references: [id], onDelete: SetNull)
+  ruang_kelas RuangKelas? @relation(fields: [ruang_kelas_id], references: [id], onDelete: SetNull)
+  rombel      Rombel[]
+  jadwal      JadwalPelajaran[]
+
+  @@unique([nama, tingkat])
+}
+
+// ─── MATA PELAJARAN ────────────────────────────
+model MataPelajaran {
+  id        String  @id @default(uuid())
+  kode      String  @unique // "MTK-01"
+  nama      String
+  kategori  String  // "Wajib" | "Peminatan" | "Muatan Lokal" | "Ekstrakurikuler"
+  kkm       Int     @default(75)
+  deskripsi String?
+
+  guru_mapel GuruMapel[]
+  jadwal     JadwalPelajaran[]
+  nilai      Nilai[]
+}
+
+// ─── PEMETAAN GURU - MATA PELAJARAN ────────────
+model GuruMapel {
+  id                String @id @default(uuid())
+  guru_id           String
+  mata_pelajaran_id String
+  kelas_diampu      String // Comma-separated: "X IPA 1, X IPA 2"
+  jam_per_minggu    Int    @default(0)
+
+  guru           User          @relation(fields: [guru_id], references: [id], onDelete: Cascade)
+  mata_pelajaran MataPelajaran @relation(fields: [mata_pelajaran_id], references: [id], onDelete: Cascade)
+
+  @@unique([guru_id, mata_pelajaran_id])
+}
+
+// ─── ROMBONGAN BELAJAR ─────────────────────────
+model Rombel {
+  id              String @id @default(uuid())
+  master_kelas_id String
+  tahun_ajaran_id String
+  wali_kelas_id   String?
+  ruang_kelas_id  String?
+
+  master_kelas MasterKelas  @relation(fields: [master_kelas_id], references: [id], onDelete: Cascade)
+  tahun_ajaran TahunAjaran  @relation(fields: [tahun_ajaran_id], references: [id], onDelete: Cascade)
+  wali_kelas   User?        @relation("WaliKelasRombelRelation", fields: [wali_kelas_id], references: [id], onDelete: SetNull)
+  ruang_kelas  RuangKelas?  @relation(fields: [ruang_kelas_id], references: [id], onDelete: SetNull)
+
+  siswa RombelSiswa[]
+
+  @@unique([master_kelas_id, tahun_ajaran_id])
+}
+
+// ─── ROMBEL ↔ SISWA (Many-to-Many) ─────────────
+model RombelSiswa {
+  id        String @id @default(uuid())
+  rombel_id String
+  siswa_id  String
+
+  rombel Rombel @relation(fields: [rombel_id], references: [id], onDelete: Cascade)
+  siswa  User   @relation(fields: [siswa_id], references: [id], onDelete: Cascade)
+
+  @@unique([rombel_id, siswa_id])
+}
+
+// ─── JADWAL PELAJARAN ──────────────────────────
+model JadwalPelajaran {
+  id                String @id @default(uuid())
+  master_kelas_id   String
+  mata_pelajaran_id String
+  guru_id           String
+  ruang_kelas_id    String?
+  hari              String // "Senin" | "Selasa" | "Rabu" | "Kamis" | "Jumat"
+  jam_mulai         String // "07:00"
+  jam_selesai       String // "07:45"
+  slot_index        Int    @default(0) // untuk urutan di grid
+
+  master_kelas   MasterKelas   @relation(fields: [master_kelas_id], references: [id], onDelete: Cascade)
+  mata_pelajaran MataPelajaran @relation(fields: [mata_pelajaran_id], references: [id], onDelete: Cascade)
+  ruang_kelas    RuangKelas?   @relation(fields: [ruang_kelas_id], references: [id], onDelete: SetNull)
+  guru           User          @relation(fields: [guru_id], references: [id], onDelete: Cascade)
+
+  kehadiran      Kehadiran[]
+  jurnal_mengajar JurnalMengajar[]
+}
+
+// ─── KEHADIRAN / PRESENSI ──────────────────────
+model Kehadiran {
+  id         String  @id @default(uuid())
+  siswa_id   String
+  jadwal_id  String
+  tanggal    String  // "2026-04-16"
+  status     String  // "HADIR" | "SAKIT" | "IZIN" | "ALPA"
+  keterangan String?
+  pertemuan_ke Int?
+  topik        String?
+  qr_token     String?
+
+  siswa  User            @relation(fields: [siswa_id], references: [id], onDelete: Cascade)
+  jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+
+  @@unique([siswa_id, jadwal_id, tanggal])
+}
+
+// ─── NILAI ─────────────────────────────────────
+model Nilai {
+  id                String @id @default(uuid())
+  siswa_id          String
+  mata_pelajaran_id String
+  semester_id       String
+  nilai_tugas       Float  @default(0)
+  nilai_uh          Float  @default(0)
+  nilai_uts         Float  @default(0)
+  nilai_uas         Float  @default(0)
+  nilai_keaktifan   Float  @default(0)
+  nilai_kehadiran   Float  @default(0)
+  bobot_tugas       Float  @default(20)
+  bobot_uh          Float  @default(20)
+  bobot_uts         Float  @default(20)
+  bobot_uas         Float  @default(20)
+  bobot_keaktifan   Float  @default(10)
+  bobot_kehadiran   Float  @default(10)
+  nilai_akhir       Float  @default(0)
+  predikat          String @default("-")
+
+  siswa          User          @relation(fields: [siswa_id], references: [id], onDelete: Cascade)
+  mata_pelajaran MataPelajaran @relation(fields: [mata_pelajaran_id], references: [id], onDelete: Cascade)
+  semester       Semester      @relation(fields: [semester_id], references: [id], onDelete: Cascade)
+
+  @@unique([siswa_id, mata_pelajaran_id, semester_id])
+}
+
+// ─── KONTEN PUBLIK (CMS) ──────────────────────
+model KontenPublik {
+  id          String   @id @default(uuid())
+  tipe        String   // "HERO" | "BERITA" | "PRESTASI" | "VIDEO"
+  judul       String
+  konten      String?  // Body text / description
+  gambar_url  String?  // Image URL
+  video_url   String?  // YouTube/embed URL
+  urutan      Int      @default(0)
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+}
+
+// ─── JURNAL MENGAJAR ──────────────────────────
+model JurnalMengajar {
+  id                String   @id @default(uuid())
+  jadwal_id         String
+  guru_id           String
+  tanggal           String   // "2026-04-16"
+  pertemuan_ke      Int
+  judul_materi      String
+  deskripsi_kegiatan String?
+  created_at        DateTime @default(now())
+
+  jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+
+  @@unique([jadwal_id, tanggal])
+}
+
+// ─── CATATAN AKADEMIK ─────────────────────────
+model CatatanAkademik {
+  id            String   @id @default(uuid())
+  siswa_id      String
+  semester_id   String
+  wali_kelas_id String
+  catatan       String
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  siswa     User     @relation("CatatanSiswaRelation", fields: [siswa_id], references: [id], onDelete: Cascade)
+  semester  Semester @relation(fields: [semester_id], references: [id], onDelete: Cascade)
+  wali_kelas User   @relation("CatatanWaliRelation", fields: [wali_kelas_id], references: [id], onDelete: Cascade)
+
+  @@unique([siswa_id, semester_id])
 }

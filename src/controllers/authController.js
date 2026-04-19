@@ -1,59 +1,49 @@
-const { PrismaClient } = require('@prisma/client');
-const { Pool } = require('pg');
-const { PrismaPg } = require('@prisma/adapter-pg');
+// src/controllers/authController.js
+// ═══════════════════════════════════════════════
+// AUTHENTICATION CONTROLLER
+// Universal login for all roles
+// ═══════════════════════════════════════════════
+
+const prisma = require('../config/prisma');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-//Inisialisasi Koneksi Database (Prisma 7 Adapter)
-
-const connectionString = process.env.DATABASE_URL;
-const pool = new Pool({ connectionString });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
-
 /**
- * Controller untuk Login Administrator
+ * POST /api/auth/login
+ * Universal login – accepts all roles
  */
-const loginAdmin = async (req, res) => {
+const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // A. Validasi Input Dasar
+    // A. Validasi Input
     if (!email || !password) {
       return res.status(400).json({ 
         message: 'Email dan password wajib diisi' 
       });
     }
 
-    // B. Cari User di Database berdasarkan Email
-    // Kita juga mengambil (include) data Role untuk pengecekan RBAC
+    // B. Cari User + Role
     const user = await prisma.user.findUnique({
       where: { email },
       include: { role: true }
     });
 
-    // C. Validasi Keberadaan User & Status Akun
+    // C. Validasi Keberadaan User
     if (!user) {
       return res.status(401).json({ 
         message: 'Kredensial tidak valid' 
       });
     }
 
+    // D. Cek Status Aktif
     if (!user.status_aktif) {
       return res.status(403).json({ 
-        message: 'Akun Anda telah dinonaktifkan. Silakan hubungi sistem.' 
+        message: 'Akun Anda telah dinonaktifkan. Silakan hubungi administrator.' 
       });
     }
 
-    // D. Validasi Role (RBAC - Role-Based Access Control)
-    // Memastikan hanya user dengan role 'Administrator' yang bisa login
-    if (user.role.nama_role !== 'Administrator') {
-      return res.status(403).json({ 
-        message: 'Akses ditolak. Endpoint ini khusus untuk Administrator.' 
-      });
-    }
-
-    // E. Verifikasi Password menggunakan Bcrypt
+    // E. Verifikasi Password
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     if (!isPasswordValid) {
       return res.status(401).json({ 
@@ -61,25 +51,36 @@ const loginAdmin = async (req, res) => {
       });
     }
 
-    // F. Pembuatan JSON Web Token (JWT)
-    // Token ini akan digunakan oleh Frontend untuk request selanjutnya
+    // F. Map role DB → role frontend
+    const roleMapping = {
+      'Administrator': 'admin',
+      'Kurikulum': 'curriculum',
+      'Guru Mapel': 'teacher',
+      'Wali Kelas': 'teacher',
+      'Siswa': 'student',
+    };
+
+    // G. Buat JWT
     const token = jwt.sign(
       { 
         userId: user.id, 
         role: user.role.nama_role 
       },
-      process.env.JWT_SECRET, // Diambil dari file .env
-      { expiresIn: '8h' }    // Sesi berlaku selama 8 jam jam kerja
+      process.env.JWT_SECRET,
+      { expiresIn: '8h' }
     );
 
-    // G. Respon Berhasil
+    // H. Response sesuai format frontend User.fromJson
     return res.status(200).json({
       message: 'Login Berhasil',
       token,
       user: {
         id: user.id,
         email: user.email,
-        role: user.role.nama_role
+        name: user.nama_lengkap || user.email.split('@')[0],
+        role: roleMapping[user.role.nama_role] || 'student',
+        avatar: user.avatar_url,
+        password: '', // Frontend expects this field but we never send actual password
       }
     });
 
@@ -91,4 +92,44 @@ const loginAdmin = async (req, res) => {
   }
 };
 
-module.exports = { loginAdmin };
+/**
+ * GET /api/auth/me
+ * Get current logged-in user info
+ */
+const getMe = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      include: { role: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User tidak ditemukan' });
+    }
+
+    const roleMapping = {
+      'Administrator': 'admin',
+      'Kurikulum': 'curriculum',
+      'Guru Mapel': 'teacher',
+      'Wali Kelas': 'teacher',
+      'Siswa': 'student',
+    };
+
+    return res.status(200).json({
+      message: 'Data user berhasil diambil',
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.nama_lengkap || user.email.split('@')[0],
+        role: roleMapping[user.role.nama_role] || 'student',
+        avatar: user.avatar_url,
+        password: '',
+      }
+    });
+  } catch (error) {
+    console.error('GetMe Error:', error);
+    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+  }
+};
+
+module.exports = { login, getMe };
