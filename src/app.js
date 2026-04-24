@@ -41,6 +41,7 @@ app.use('/api/master', require('./routes/masterDataRoutes'));
 app.use('/api/mata-pelajaran', require('./routes/mataPelajaranRoutes'));
 app.use('/api/guru-mapel', require('./routes/guruMapelRoutes'));
 app.use('/api/rombel', require('./routes/rombelRoutes'));
+app.use('/api/promosi', require('./routes/promosiRoutes'));
 app.use('/api/jadwal', require('./routes/jadwalRoutes'));
 
 // Kehadiran & Nilai (Guru/Siswa)

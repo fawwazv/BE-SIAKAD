@@ -16,7 +16,7 @@ router.get('/', rombelCtrl.getAll);
 router.get('/available-wali', rombelCtrl.getAvailableWali);
 
 router.post('/', 
-  requireFields('masterKelasId', 'tahunAjaranId'),
+  requireFields('masterKelasId'),
   rombelCtrl.create
 );
 

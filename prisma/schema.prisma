@@ -166,6 +166,7 @@ model Rombel {
   tahun_ajaran_id String
   wali_kelas_id   String?
   ruang_kelas_id  String?
+  is_locked       Boolean @default(false)
 
   master_kelas MasterKelas  @relation(fields: [master_kelas_id], references: [id], onDelete: Cascade)
   tahun_ajaran TahunAjaran  @relation(fields: [tahun_ajaran_id], references: [id], onDelete: Cascade)
@@ -179,9 +180,10 @@ model Rombel {
 
 // ─── ROMBEL ↔ SISWA (Many-to-Many) ─────────────
 model RombelSiswa {
-  id        String @id @default(uuid())
-  rombel_id String
-  siswa_id  String
+  id             String @id @default(uuid())
+  rombel_id      String
+  siswa_id       String
+  status_promosi String? // "NAIK" or "TINGGAL" or null
 
   rombel Rombel @relation(fields: [rombel_id], references: [id], onDelete: Cascade)
   siswa  User   @relation(fields: [siswa_id], references: [id], onDelete: Cascade)

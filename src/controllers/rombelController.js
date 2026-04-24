@@ -147,9 +147,23 @@ const getAvailableSiswa = async (req, res) => {
     const siswaRole = await prisma.role.findUnique({ where: { nama_role: 'Siswa' } });
     if (!siswaRole) return res.status(200).json({ data: [] });
 
-    // Get already assigned IDs
+    // Get current rombel's tahun_ajaran_id
+    const currentRombel = await prisma.rombel.findUnique({
+      where: { id: req.params.id },
+      select: { tahun_ajaran_id: true }
+    });
+
+    if (!currentRombel) {
+      return res.status(404).json({ message: 'Rombel tidak ditemukan' });
+    }
+
+    // Get already assigned IDs in ANY rombel for this tahun_ajaran
     const assigned = await prisma.rombelSiswa.findMany({
-      where: { rombel_id: req.params.id },
+      where: { 
+        rombel: {
+          tahun_ajaran_id: currentRombel.tahun_ajaran_id
+        }
+      },
       select: { siswa_id: true },
     });
     const assignedIds = assigned.map((a) => a.siswa_id);
@@ -184,8 +198,14 @@ const getAvailableSiswa = async (req, res) => {
  */
 const getAvailableWali = async (req, res) => {
   try {
-    const guruRole = await prisma.role.findUnique({ where: { nama_role: 'Guru' } });
-    if (!guruRole) return res.status(200).json({ data: [] });
+    const validRoles = await prisma.role.findMany({
+      where: {
+        nama_role: { in: ['Guru Mapel', 'Wali Kelas', 'Guru'] }
+      }
+    });
+    const validRoleIds = validRoles.map(r => r.id);
+
+    if (validRoleIds.length === 0) return res.status(200).json({ data: [] });
 
     const activeTahun = await prisma.tahunAjaran.findFirst({ where: { is_active: true } });
     if (!activeTahun) return res.status(200).json({ data: [] });
@@ -209,7 +229,7 @@ const getAvailableWali = async (req, res) => {
 
     const availableGurus = await prisma.user.findMany({
       where: {
-        role_id: guruRole.id,
+        role_id: { in: validRoleIds },
         status_aktif: true,
         id: { notIn: assignedWaliIds }
       },
