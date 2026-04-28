@@ -51,6 +51,9 @@ model User {
   // Relasi catatan akademik
   catatan_sebagai_siswa CatatanAkademik[] @relation("CatatanSiswaRelation")
   catatan_sebagai_wali  CatatanAkademik[] @relation("CatatanWaliRelation")
+
+  // Relasi jurnal mengajar (sebagai guru)
+  jurnal_mengajar JurnalMengajar[]
 }
 
 // ─── USER PROFILE (Biodata Lengkap) ─────────────
@@ -208,8 +211,11 @@ model JadwalPelajaran {
   ruang_kelas    RuangKelas?   @relation(fields: [ruang_kelas_id], references: [id], onDelete: SetNull)
   guru           User          @relation(fields: [guru_id], references: [id], onDelete: Cascade)
 
-  kehadiran      Kehadiran[]
+  kehadiran       Kehadiran[]
   jurnal_mengajar JurnalMengajar[]
+
+  // Satu kelas tidak boleh memiliki 2 jadwal di hari & slot yang sama
+  @@unique([master_kelas_id, hari, slot_index])
 }
 
 // ─── KEHADIRAN / PRESENSI ──────────────────────
@@ -284,7 +290,9 @@ model JurnalMengajar {
   created_at        DateTime @default(now())
 
   jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+  guru   User            @relation(fields: [guru_id], references: [id], onDelete: Cascade)
 
+  // Satu jadwal hanya bisa punya satu jurnal per tanggal
   @@unique([jadwal_id, tanggal])
 }
 

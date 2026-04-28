@@ -87,12 +87,12 @@ const rateLimiter = (options = {}) => {
 // ─── Pre-configured Limiters ────────────────────
 
 /**
- * Login rate limiter: 5 attempts per 15 minutes per IP
+ * Login rate limiter: 20 attempts per 5 minutes per IP
  */
 const loginLimiter = rateLimiter({
-  windowMs: 15 * 60 * 1000,
-  maxRequests: 5,
-  message: 'Terlalu banyak percobaan login. Silakan coba lagi dalam 15 menit.',
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 20,
+  message: 'Terlalu banyak percobaan login. Silakan coba lagi dalam 5 menit.',
   keyPrefix: 'login',
 });
 

@@ -411,19 +411,18 @@ async function main() {
 
   // guru index -> mapel kode(s)
   const guruMapelAssignments = [
-    { guruIdx: 0,  mapelKode: 'MTK-W',  kelas: 'X-1, X-2, X-3, XI-1, XI-2',     jam: 12 },
-    { guruIdx: 1,  mapelKode: 'MTK-P',  kelas: 'XI-3, XI-4, XI-5, XII-1, XII-2', jam: 10 },
-    { guruIdx: 2,  mapelKode: 'FIS-01', kelas: 'X-1, X-2, XI-1, XI-2, XII-1',    jam: 10 },
-    { guruIdx: 3,  mapelKode: 'KIM-01', kelas: 'X-3, X-4, XI-3, XI-4, XII-3',    jam: 10 },
-    { guruIdx: 4,  mapelKode: 'BIO-01', kelas: 'X-4, X-5, XI-4, XI-5, XII-4',    jam: 10 },
-    { guruIdx: 5,  mapelKode: 'BIN-01', kelas: 'X-1, X-2, X-3, X-4, X-5',        jam: 10 },
-    { guruIdx: 6,  mapelKode: 'BIG-01', kelas: 'XI-1, XI-2, XI-3, XII-1, XII-2',  jam: 10 },
-    { guruIdx: 7,  mapelKode: 'PKN-01', kelas: 'X-1, X-2, X-3, XI-1, XII-1',      jam: 8 },
-    { guruIdx: 7,  mapelKode: 'SEJ-01', kelas: 'X-4, X-5, XI-4, XI-5, XII-4',     jam: 8 },
-    { guruIdx: 8,  mapelKode: 'SEJ-01', kelas: 'X-1, X-2, X-3, XI-1, XII-1',      jam: 8 },
-    { guruIdx: 9,  mapelKode: 'PAI-01', kelas: 'X-1, X-2, X-3, X-4, X-5',         jam: 10 },
-    { guruIdx: 10, mapelKode: 'SUN-01', kelas: 'X-1, X-2, X-3, X-4, X-5',         jam: 10 }, // wali kelas teaches Sunda
-    { guruIdx: 10, mapelKode: 'PJK-01', kelas: 'X-1, X-2, X-3',                    jam: 6 },
+    { guruIdx: 0,  mapelKode: 'MTK-W',  kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2', jam: 24 },
+    { guruIdx: 1,  mapelKode: 'MTK-P',  kelas: 'XI-3, XI-4, XI-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 24 },
+    { guruIdx: 2,  mapelKode: 'FIS-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XII-1, XII-2', jam: 22 },
+    { guruIdx: 3,  mapelKode: 'KIM-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-3, XI-4, XII-3, XII-4', jam: 22 },
+    { guruIdx: 4,  mapelKode: 'BIO-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-4, XI-5, XII-4, XII-5', jam: 22 },
+    { guruIdx: 5,  mapelKode: 'BIN-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XI-3, XI-4, XI-5', jam: 24 },
+    { guruIdx: 6,  mapelKode: 'BIG-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 24 },
+    { guruIdx: 7,  mapelKode: 'PKN-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XI-3, XI-4, XI-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 28 },
+    { guruIdx: 8,  mapelKode: 'SEJ-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XI-3, XI-4, XI-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 28 },
+    { guruIdx: 9,  mapelKode: 'PAI-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XI-3, XI-4, XI-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 28 },
+    { guruIdx: 10, mapelKode: 'SUN-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XI-1, XI-2, XI-3, XI-4, XI-5', jam: 20 },
+    { guruIdx: 10, mapelKode: 'PJK-01', kelas: 'X-1, X-2, X-3, X-4, X-5, XII-1, XII-2, XII-3, XII-4, XII-5', jam: 20 },
   ];
 
   for (const gm of guruMapelAssignments) {
