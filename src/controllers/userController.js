@@ -98,7 +98,14 @@ const getById = async (req, res) => {
 
 /**
  * POST /api/users
- * Create new user
+ * Create new user with auto-sync to UserProfile (DB Transaction)
+ * 
+ * Flow:
+ * 1. Validate input & check duplicates
+ * 2. Inside a transaction:
+ *    a. Create User record (credentials + role)
+ *    b. Auto-create empty UserProfile as "shell" for future self-update
+ * 3. Return created user data for immediate frontend rendering
  */
 const create = async (req, res) => {
   try {
@@ -122,21 +129,30 @@ const create = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = await prisma.user.create({
-      data: {
-        email,
-        password_hash: hashedPassword,
-        nama_lengkap: name,
-        nomor_induk: idNumber || null,
-        role_id: roleRecord.id,
-        status_aktif: status !== 'Tidak Aktif',
-        ...(req.body.profile && {
-          profile: {
-            create: req.body.profile
-          }
-        })
-      },
-      include: { role: true, profile: true },
+    // ── DB Transaction: User + UserProfile (atomic) ──
+    // If either insert fails, both are rolled back automatically
+    const user = await prisma.$transaction(async (tx) => {
+      // Step 1: Create user credentials
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          password_hash: hashedPassword,
+          nama_lengkap: name,
+          nomor_induk: idNumber || null,
+          role_id: roleRecord.id,
+          status_aktif: status !== 'Tidak Aktif',
+        },
+        include: { role: true },
+      });
+
+      // Step 2: Auto-create empty UserProfile (shell for self-update)
+      // FK: userProfile.user_id → users.id (onDelete: Cascade)
+      // This profile will be filled later by the user themselves
+      await tx.userProfile.create({
+        data: { user_id: newUser.id },
+      });
+
+      return newUser;
     });
 
     return res.status(201).json({
@@ -145,7 +161,7 @@ const create = async (req, res) => {
         id: user.id,
         name: user.nama_lengkap,
         email: user.email,
-        idNumber: user.nomor_induk,
+        idNumber: user.nomor_induk || '-',
         role: user.role.nama_role,
         status: user.status_aktif ? 'Aktif' : 'Tidak Aktif',
       },

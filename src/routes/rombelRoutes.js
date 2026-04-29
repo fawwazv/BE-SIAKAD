@@ -15,44 +15,44 @@ router.get('/', rombelCtrl.getAll);
 
 router.get('/available-wali', rombelCtrl.getAvailableWali);
 
-router.post('/', 
+router.post('/',
   requireFields('masterKelasId'),
   rombelCtrl.create
 );
 
-router.put('/:id', 
+router.put('/:id',
   validateUUID('id'),
   rombelCtrl.update
 );
 
-router.delete('/:id', 
+router.delete('/:id',
   validateUUID('id'),
   rombelCtrl.remove
 );
 
 // Siswa management within rombel
-router.get('/:id/siswa', 
+router.get('/:id/siswa',
   validateUUID('id'),
   rombelCtrl.getSiswa
 );
 
-router.get('/:id/available-siswa', 
+router.get('/:id/available-siswa',
   validateUUID('id'),
   rombelCtrl.getAvailableSiswa
 );
 
-router.post('/:id/siswa', 
+router.post('/:id/siswa',
   validateUUID('id'),
   requireFields('siswaIds'),
   rombelCtrl.assignSiswa
 );
 
-router.delete('/:id/siswa', 
+router.delete('/:id/siswa',
   validateUUID('id'),
   rombelCtrl.removeAllSiswa
 );
 
-router.delete('/:id/siswa/:siswaId', 
+router.delete('/:id/siswa/:siswaId',
   validateUUID('id', 'siswaId'),
   rombelCtrl.removeSiswa
 );

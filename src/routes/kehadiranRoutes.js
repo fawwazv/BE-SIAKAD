@@ -11,7 +11,9 @@ const { requireFields, validateUUID, validateDateFormat, validateKehadiranStatus
 const { verifyGuruOwnsJadwal } = require('../middlewares/ownershipMiddleware');
 const { qrScanLimiter } = require('../middlewares/rateLimiter');
 
-// Guru endpoints
+// ─── Guru Endpoints ──────────────────────────────
+
+// Batch save attendance (manual mode)
 router.post('/batch', 
   verifyToken, 
   authorizeRoles('Guru Mapel', 'Wali Kelas'), 
@@ -22,6 +24,7 @@ router.post('/batch',
   kehadiranCtrl.saveBatch
 );
 
+// Get attendance recap
 router.get('/rekap/:jadwalId', 
   verifyToken, 
   authorizeRoles('Guru Mapel', 'Wali Kelas'),
@@ -29,6 +32,7 @@ router.get('/rekap/:jadwalId',
   kehadiranCtrl.getRekap
 );
 
+// Get attendance history for a jadwal
 router.get('/history/:jadwalId', 
   verifyToken, 
   authorizeRoles('Guru Mapel', 'Wali Kelas'),
@@ -36,22 +40,52 @@ router.get('/history/:jadwalId',
   kehadiranCtrl.getHistory
 );
 
+// Generate QR token (first time for a session)
 router.post('/generate-qr', 
   verifyToken, 
   authorizeRoles('Guru Mapel', 'Wali Kelas'),
-  requireFields('jadwalId', 'tanggal'),
+  requireFields('jadwalId', 'tanggal', 'pertemuanKe'),
   validateDateFormat,
   verifyGuruOwnsJadwal,
   kehadiranCtrl.generateQR
 );
 
-// Siswa endpoints
+// Refresh QR token (auto-refresh setiap 3 menit)
+router.post('/refresh-qr',
+  verifyToken,
+  authorizeRoles('Guru Mapel', 'Wali Kelas'),
+  requireFields('jadwalId', 'tanggal', 'pertemuanKe'),
+  validateDateFormat,
+  verifyGuruOwnsJadwal,
+  kehadiranCtrl.refreshQR
+);
+
+// End attendance session (guru closes session)
+router.post('/end-session',
+  verifyToken,
+  authorizeRoles('Guru Mapel', 'Wali Kelas'),
+  requireFields('jadwalId', 'tanggal'),
+  validateDateFormat,
+  kehadiranCtrl.endSession
+);
+
+// Live attendance polling — returns siswaId list who are HADIR this session
+router.get('/live-attendance',
+  verifyToken,
+  authorizeRoles('Guru Mapel', 'Wali Kelas'),
+  kehadiranCtrl.getSessionAttendance
+);
+
+// ─── Siswa Endpoints ─────────────────────────────
+
+// Get attendance history for a student
 router.get('/siswa/:siswaId', 
   verifyToken, 
   validateUUID('siswaId'),
   kehadiranCtrl.getBySiswa
 );
 
+// Scan QR to mark attendance
 router.post('/qr-scan', 
   verifyToken, 
   authorizeRoles('Siswa'), 

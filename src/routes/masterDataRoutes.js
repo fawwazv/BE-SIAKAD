@@ -14,7 +14,32 @@ const masterKelasCtrl = require('../controllers/masterKelasController');
 const { verifyToken, authorizeRoles } = require('../middlewares/authMiddleware');
 const { requireFields, validateUUID, validateTahunAjaranCode } = require('../middlewares/validationMiddleware');
 
-// All routes require Admin and Kurikulum roles
+// ── Public (authenticated) — active semester for navbar ──
+// Must be BEFORE the authorizeRoles middleware below
+router.get('/active-semester', verifyToken, async (req, res) => {
+  try {
+    const prisma = require('../config/prisma');
+    const semester = await prisma.semester.findFirst({
+      where: { is_active: true },
+      include: { tahun_ajaran: true }
+    });
+    if (!semester) {
+      return res.status(200).json({ data: null, message: 'Tidak ada semester aktif' });
+    }
+    return res.status(200).json({
+      data: {
+        id: semester.id,
+        nama: semester.nama,
+        tahunAjaran: semester.tahun_ajaran?.kode || '-',
+        label: `${semester.nama} - ${semester.tahun_ajaran?.kode || '-'}`,
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Gagal memuat semester aktif' });
+  }
+});
+
+// All routes BELOW require Admin and Kurikulum roles
 router.use(verifyToken, authorizeRoles('Administrator', 'Kurikulum'));
 
 // ── Tahun Ajaran ────────────────────────────────

@@ -40,45 +40,29 @@ const getAll = async (req, res) => {
       activeMasterKelasIds = activeRombels.map((r) => r.master_kelas_id);
     }
 
-    // Count scheduled slots per guru using master_kelas relation (not rombel)
-    const jadwalList = await prisma.jadwalPelajaran.findMany({
+    // Count scheduled slots per guru (filtered by active year via master_kelas)
+    const jadwalCounts = await prisma.jadwalPelajaran.groupBy({
+      by: ['guru_id'],
       where: activeMasterKelasIds
         ? { master_kelas_id: { in: activeMasterKelasIds } }
         : {},
-      select: {
-        guru_id: true,
-        master_kelas: { select: { nama: true } },
-      },
+      _count: { id: true },
     });
-
-    // Build per-guru: count + unique kelas names from actual jadwal
-    const guruStats = {};
-    for (const j of jadwalList) {
-      const gid = j.guru_id;
-      if (!guruStats[gid]) guruStats[gid] = { count: 0, kelasSet: new Set() };
-      guruStats[gid].count += 1;
-      const kelasNama = j.master_kelas?.nama;
-      if (kelasNama) guruStats[gid].kelasSet.add(kelasNama);
-    }
+    const countMap = {};
+    jadwalCounts.forEach((j) => (countMap[j.guru_id] = j._count.id));
 
     return res.status(200).json({
       message: 'Data pemetaan guru-mapel berhasil diambil',
-      data: data.map((d) => {
-        const stats = guruStats[d.guru_id];
-        const derivedClasses = stats && stats.kelasSet.size > 0
-          ? [...stats.kelasSet].sort().join(', ')
-          : (d.kelas_diampu || '-');
-        return {
-          id: d.id,
-          teacher: d.guru.nama_lengkap,
-          teacherId: d.guru_id,
-          subject: d.mata_pelajaran.nama,
-          subjectId: d.mata_pelajaran_id,
-          classes: derivedClasses,
-          hoursPerWeek: d.jam_per_minggu,
-          scheduled: stats?.count || 0,
-        };
-      }),
+      data: data.map((d) => ({
+        id: d.id,
+        teacher: d.guru.nama_lengkap,
+        teacherId: d.guru_id,
+        subject: d.mata_pelajaran.nama,
+        subjectId: d.mata_pelajaran_id,
+        classes: d.kelas_diampu || '-',   // selalu dari field manual (kelas_diampu)
+        hoursPerWeek: d.jam_per_minggu,
+        scheduled: countMap[d.guru_id] || 0, // dihitung dari jadwal aktif
+      })),
     });
   } catch (error) {
     console.error('GuruMapel GetAll Error:', error);

@@ -213,6 +213,7 @@ model JadwalPelajaran {
 
   kehadiran       Kehadiran[]
   jurnal_mengajar JurnalMengajar[]
+  sesi_absensi    SesiAbsensi[]
 
   // Satu kelas tidak boleh memiliki 2 jadwal di hari & slot yang sama
   @@unique([master_kelas_id, hari, slot_index])
@@ -311,4 +312,22 @@ model CatatanAkademik {
   wali_kelas User   @relation("CatatanWaliRelation", fields: [wali_kelas_id], references: [id], onDelete: Cascade)
 
   @@unique([siswa_id, semester_id])
+}
+
+// ─── SESI ABSENSI QR ──────────────────────────
+model SesiAbsensi {
+  id              String   @id @default(uuid())
+  jadwal_id       String
+  guru_id         String
+  tanggal         String   // "2026-04-29"
+  pertemuan_ke    Int
+  token           String   @unique
+  expired_at      DateTime
+  is_active       Boolean  @default(true)
+  created_at      DateTime @default(now())
+
+  jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([jadwal_id, tanggal])
 }

@@ -165,11 +165,35 @@ const update = async (req, res) => {
 
 /**
  * DELETE /api/jurnal/:id
+ * Cascade: hapus Kehadiran & SesiAbsensi terkait dulu, lalu JurnalMengajar
  */
 const remove = async (req, res) => {
   try {
-    await prisma.jurnalMengajar.delete({ where: { id: req.params.id } });
-    return res.status(200).json({ message: 'Jurnal mengajar berhasil dihapus' });
+    // Get jurnal data first to get jadwal_id + tanggal
+    const jurnal = await prisma.jurnalMengajar.findUnique({
+      where: { id: req.params.id },
+      select: { jadwal_id: true, tanggal: true }
+    });
+
+    if (!jurnal) {
+      return res.status(404).json({ message: 'Jurnal tidak ditemukan' });
+    }
+
+    // Cascade delete (order matters — FK constraints)
+    await prisma.$transaction([
+      // 1. Hapus semua Kehadiran untuk sesi ini
+      prisma.kehadiran.deleteMany({
+        where: { jadwal_id: jurnal.jadwal_id, tanggal: jurnal.tanggal }
+      }),
+      // 2. Hapus SesiAbsensi terkait
+      prisma.sesiAbsensi.deleteMany({
+        where: { jadwal_id: jurnal.jadwal_id, tanggal: jurnal.tanggal }
+      }),
+      // 3. Hapus JurnalMengajar
+      prisma.jurnalMengajar.delete({ where: { id: req.params.id } }),
+    ]);
+
+    return res.status(200).json({ message: 'Pertemuan dan seluruh data absensinya berhasil dihapus' });
   } catch (error) {
     console.error('Jurnal Delete Error:', error);
     return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
