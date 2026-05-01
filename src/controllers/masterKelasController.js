@@ -5,6 +5,21 @@
 
 const prisma = require('../config/prisma');
 
+const syncActiveRombelWali = async (masterKelasId, waliKelasId) => {
+  const activeTahun = await prisma.tahunAjaran.findFirst({
+    where: { is_active: true },
+    select: { id: true },
+  });
+
+  await prisma.rombel.updateMany({
+    where: {
+      master_kelas_id: masterKelasId,
+      ...(activeTahun ? { tahun_ajaran_id: activeTahun.id } : {}),
+    },
+    data: { wali_kelas_id: waliKelasId || null },
+  });
+};
+
 const getAll = async (req, res) => {
   try {
     const data = await prisma.masterKelas.findMany({
@@ -53,6 +68,8 @@ const create = async (req, res) => {
       },
     });
 
+    await syncActiveRombelWali(data.id, data.wali_kelas_id);
+
     return res.status(201).json({
       message: 'Master kelas berhasil ditambahkan',
       data: {
@@ -85,6 +102,10 @@ const update = async (req, res) => {
         ruang_kelas: { select: { kode: true } },
       },
     });
+
+    if (homeroomTeacherId !== undefined) {
+      await syncActiveRombelWali(data.id, data.wali_kelas_id);
+    }
 
     return res.status(200).json({
       message: 'Master kelas berhasil diperbarui',

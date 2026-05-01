@@ -102,26 +102,69 @@ const getByGuru = async (req, res) => {
   }
 };
 
+const timeToMins = (t) => {
+  if (!t) return 0;
+  const [h, m] = t.split(':').map(Number);
+  return (h * 60) + (m || 0);
+};
+
+const checkTimeConflict = (schedules, newStart, newEnd, skipId = null) => {
+  for (const ex of schedules) {
+    if (skipId && ex.id === skipId) continue;
+    const exStart = timeToMins(ex.jam_mulai);
+    const exEnd = timeToMins(ex.jam_selesai);
+    if (newStart < exEnd && newEnd > exStart) {
+      return ex;
+    }
+  }
+  return null;
+};
+
 const create = async (req, res) => {
   try {
-    const { classId, subjectId, guruId, roomId, day, startTime, endTime, slotIndex } = req.body;
+    const { classId, subjectId, guruId, roomId, day, startTime, endTime } = req.body;
 
     if (!classId || !subjectId || !guruId || !day || !startTime || !endTime) {
       return res.status(400).json({ message: 'Data jadwal tidak lengkap' });
     }
 
-    // Check for teacher conflict
-    const conflict = await prisma.jadwalPelajaran.findFirst({
-      where: {
-        guru_id: guruId,
-        hari: day,
-        slot_index: slotIndex || 0,
+    const startMins = timeToMins(startTime);
+    const endMins = timeToMins(endTime);
+
+    // Get all schedules for the class on that day
+    const classSchedules = await prisma.jadwalPelajaran.findMany({
+      where: { master_kelas_id: classId, hari: day },
+      include: { mata_pelajaran: { select: { nama: true } } },
+    });
+
+    // Check Class Conflict
+    const classConflict = checkTimeConflict(classSchedules, startMins, endMins);
+    if (classConflict) {
+      return res.status(400).json({ 
+        message: `Jadwal bentrok! Kelas ini sudah ada pelajaran ${classConflict.mata_pelajaran?.nama} pada jam ${classConflict.jam_mulai} - ${classConflict.jam_selesai}.`
+      });
+    }
+
+    // Get all schedules for the teacher on that day
+    const guruSchedules = await prisma.jadwalPelajaran.findMany({
+      where: { guru_id: guruId, hari: day },
+      include: { 
+        master_kelas: { select: { nama: true } },
+        mata_pelajaran: { select: { nama: true } }
       },
     });
 
-    if (conflict) {
-      return res.status(400).json({ message: 'Guru sudah dijadwalkan pada slot yang sama' });
+    // Check Guru Conflict
+    const guruConflict = checkTimeConflict(guruSchedules, startMins, endMins);
+    if (guruConflict) {
+      return res.status(400).json({ 
+        message: `Jadwal bentrok! Guru ini sudah mengajar ${guruConflict.mata_pelajaran?.nama} di kelas ${guruConflict.master_kelas?.nama} pada jam ${guruConflict.jam_mulai} - ${guruConflict.jam_selesai}.`
+      });
     }
+
+    // Assign dynamic slot_index to bypass unique constraint
+    const maxSlot = classSchedules.reduce((max, s) => Math.max(max, s.slot_index), -1);
+    const nextSlotIndex = maxSlot + 1;
 
     const data = await prisma.jadwalPelajaran.create({
       data: {
@@ -132,7 +175,7 @@ const create = async (req, res) => {
         hari: day,
         jam_mulai: startTime,
         jam_selesai: endTime,
-        slot_index: slotIndex || 0,
+        slot_index: nextSlotIndex,
       },
       include: {
         mata_pelajaran: { select: { nama: true } },
@@ -153,13 +196,60 @@ const create = async (req, res) => {
     });
   } catch (error) {
     console.error('Jadwal Create Error:', error);
-    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+    if (error.code === 'P2002') {
+      return res.status(400).json({ message: 'Gagal membuat jadwal karena terjadi duplikasi sistem.' });
+    }
+    return res.status(500).json({ message: 'Terjadi kesalahan pada server saat menambahkan jadwal. Silakan coba lagi atau hubungi administrator.' });
   }
 };
 
 const update = async (req, res) => {
   try {
-    const { classId, subjectId, guruId, roomId, day, startTime, endTime, slotIndex } = req.body;
+    const { classId, subjectId, guruId, roomId, day, startTime, endTime } = req.body;
+
+    const existing = await prisma.jadwalPelajaran.findUnique({
+      where: { id: req.params.id },
+      include: { master_kelas: { select: { nama: true } } },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: 'Jadwal tidak ditemukan. Data mungkin sudah dihapus.' });
+    }
+
+    const finalClassId = classId || existing.master_kelas_id;
+    const finalDay = day || existing.hari;
+    const finalStartTime = startTime || existing.jam_mulai;
+    const finalEndTime = endTime || existing.jam_selesai;
+    const finalGuruId = guruId || existing.guru_id;
+
+    const startMins = timeToMins(finalStartTime);
+    const endMins = timeToMins(finalEndTime);
+
+    const classSchedules = await prisma.jadwalPelajaran.findMany({
+      where: { master_kelas_id: finalClassId, hari: finalDay },
+      include: { mata_pelajaran: { select: { nama: true } } },
+    });
+
+    const classConflict = checkTimeConflict(classSchedules, startMins, endMins, req.params.id);
+    if (classConflict) {
+      return res.status(400).json({ 
+        message: `Jadwal bentrok! Kelas ini sudah ada pelajaran ${classConflict.mata_pelajaran?.nama} pada jam ${classConflict.jam_mulai} - ${classConflict.jam_selesai}.`
+      });
+    }
+
+    const guruSchedules = await prisma.jadwalPelajaran.findMany({
+      where: { guru_id: finalGuruId, hari: finalDay },
+      include: { 
+        master_kelas: { select: { nama: true } },
+        mata_pelajaran: { select: { nama: true } }
+      },
+    });
+
+    const guruConflict = checkTimeConflict(guruSchedules, startMins, endMins, req.params.id);
+    if (guruConflict) {
+      return res.status(400).json({ 
+        message: `Jadwal bentrok! Guru ini sudah mengajar ${guruConflict.mata_pelajaran?.nama} di kelas ${guruConflict.master_kelas?.nama} pada jam ${guruConflict.jam_mulai} - ${guruConflict.jam_selesai}.`
+      });
+    }
 
     const data = await prisma.jadwalPelajaran.update({
       where: { id: req.params.id },
@@ -171,13 +261,18 @@ const update = async (req, res) => {
         ...(day && { hari: day }),
         ...(startTime && { jam_mulai: startTime }),
         ...(endTime && { jam_selesai: endTime }),
-        ...(slotIndex !== undefined && { slot_index: slotIndex }),
       },
     });
     return res.status(200).json({ message: 'Jadwal berhasil diperbarui', data });
   } catch (error) {
     console.error('Jadwal Update Error:', error);
-    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+    if (error.code === 'P2002') {
+      return res.status(400).json({ message: 'Jadwal tidak dapat disimpan karena duplikasi sistem.' });
+    }
+    if (error.code === 'P2025') {
+      return res.status(404).json({ message: 'Data jadwal yang ingin diperbarui tidak ditemukan. Mungkin sudah dihapus.' });
+    }
+    return res.status(500).json({ message: 'Terjadi kesalahan pada server saat memperbarui jadwal. Silakan coba lagi atau hubungi administrator.' });
   }
 };
 
@@ -214,7 +309,16 @@ const move = async (req, res) => {
     return res.status(200).json({ message: 'Jadwal berhasil dipindahkan', data });
   } catch (error) {
     console.error('Jadwal Move Error:', error);
-    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+    if (error.code === 'P2002') {
+      const fields = error.meta?.target?.join(', ') || '';
+      return res.status(400).json({
+        message: `Jadwal tidak dapat dipindahkan karena terjadi duplikasi data pada (${fields}). Slot tujuan mungkin sudah terisi.`,
+      });
+    }
+    if (error.code === 'P2025') {
+      return res.status(404).json({ message: 'Data jadwal yang ingin dipindahkan tidak ditemukan. Mungkin sudah dihapus.' });
+    }
+    return res.status(500).json({ message: 'Terjadi kesalahan pada server saat memindahkan jadwal. Silakan coba lagi atau hubungi administrator.' });
   }
 };
 
@@ -224,7 +328,10 @@ const remove = async (req, res) => {
     return res.status(200).json({ message: 'Jadwal berhasil dihapus' });
   } catch (error) {
     console.error('Jadwal Delete Error:', error);
-    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+    if (error.code === 'P2025') {
+      return res.status(404).json({ message: 'Data jadwal yang ingin dihapus tidak ditemukan. Mungkin sudah dihapus sebelumnya.' });
+    }
+    return res.status(500).json({ message: 'Terjadi kesalahan pada server saat menghapus jadwal. Silakan coba lagi atau hubungi administrator.' });
   }
 };
 

@@ -48,7 +48,11 @@ const getAll = async (req, res) => {
   try {
     const data = await prisma.rombel.findMany({
       include: {
-        master_kelas: true,
+        master_kelas: {
+          include: {
+            wali_kelas: { select: { id: true, nama_lengkap: true } },
+          },
+        },
         tahun_ajaran: true,
         ruang_kelas: true,
         wali_kelas: { select: { id: true, nama_lengkap: true } },
@@ -68,8 +72,8 @@ const getAll = async (req, res) => {
         ruangKelasId: d.ruang_kelas_id,
         ruangKelasCode: d.ruang_kelas?.kode || '-',
         ruangKelasCapacity: d.ruang_kelas?.kapasitas || 0,
-        waliKelasId: d.wali_kelas_id,
-        waliKelasName: d.wali_kelas?.nama_lengkap || '-',
+        waliKelasId: d.wali_kelas_id || d.master_kelas.wali_kelas_id,
+        waliKelasName: d.wali_kelas?.nama_lengkap || d.master_kelas.wali_kelas?.nama_lengkap || '-',
         siswaCount: d._count.siswa,
       })),
     });
@@ -90,6 +94,11 @@ const create = async (req, res) => {
     if (!activeTahun) {
       return res.status(400).json({ message: 'Tidak ada Tahun Ajaran aktif. Aktifkan terlebih dahulu di menu Master Akademik.' });
     }
+
+    const masterKelas = await prisma.masterKelas.findUnique({
+      where: { id: masterKelasId },
+      select: { wali_kelas_id: true },
+    });
 
     // Pre-check 1: apakah rombel untuk kelas ini sudah ada?
     const existingKelas = await prisma.rombel.findFirst({
@@ -121,6 +130,7 @@ const create = async (req, res) => {
         master_kelas_id: masterKelasId,
         tahun_ajaran_id: activeTahun.id,
         ruang_kelas_id: ruangKelasId,
+        wali_kelas_id: masterKelas?.wali_kelas_id || null,
       },
       include: {
         master_kelas: true,

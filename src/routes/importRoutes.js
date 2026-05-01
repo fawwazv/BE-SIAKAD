@@ -5,11 +5,14 @@
 
 const express = require('express');
 const router = express.Router();
-const { uploadImport, importUsers, getTemplate } = require('../controllers/importController');
+const { uploadImport, importUsers, getTemplate, exportUsers } = require('../controllers/importController');
 const { verifyToken, authorizeRoles } = require('../middlewares/authMiddleware');
 
 // Download CSV template
 router.get('/template', verifyToken, authorizeRoles('Administrator'), getTemplate);
+
+// Export users to CSV/Excel (Admin only)
+router.get('/users/export', verifyToken, authorizeRoles('Administrator'), exportUsers);
 
 // Import users from CSV/Excel (Admin only)
 router.post('/users',

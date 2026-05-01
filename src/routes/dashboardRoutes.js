@@ -16,10 +16,17 @@ router.get('/stats',
   dashboardCtrl.getStats
 );
 
+// Kurikulum dashboard stats
+router.get('/kurikulum',
+  verifyToken,
+  authorizeRoles('Kurikulum', 'Administrator'),
+  dashboardCtrl.getKurikulumDashboard
+);
+
 // Wali Kelas dashboard
 router.get('/wali-kelas', 
   verifyToken, 
-  authorizeRoles('Wali Kelas'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel'),
   dashboardCtrl.getWaliKelasDashboard
 );
 
@@ -42,6 +49,13 @@ router.get('/guru/kelas/:id',
   verifyToken,
   authorizeRoles('Guru Mapel', 'Wali Kelas'),
   dashboardCtrl.getGuruClassDetail
+);
+
+// Guru quick session — Dashboard shortcut for opening attendance
+router.post('/guru/quick-session',
+  verifyToken,
+  authorizeRoles('Guru Mapel', 'Wali Kelas'),
+  dashboardCtrl.quickSession
 );
 
 // ─── Active Semester (semua role yang sudah login) ──────────────
