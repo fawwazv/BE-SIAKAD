@@ -5,6 +5,30 @@
 
 const prisma = require('../config/prisma');
 
+const semesterOrderValue = (semester) => {
+  const yearCode = semester?.tahun_ajaran?.kode || '';
+  const startYear = parseInt(yearCode.split('/')[0], 10) || 0;
+  const term = (semester?.nama || '').toLowerCase().includes('genap') ? 2 : 1;
+  return startYear * 10 + term;
+};
+
+const averageNilai = (items) => {
+  if (!items.length) return 0;
+  return items.reduce((sum, item) => sum + (Number(item.nilai_akhir) || 0), 0) / items.length;
+};
+
+const gradeLetter = (nilai) => {
+  if (nilai >= 90) return 'A';
+  if (nilai >= 85) return 'A-';
+  if (nilai >= 80) return 'B+';
+  if (nilai >= 75) return 'B';
+  if (nilai >= 70) return 'B-';
+  if (nilai >= 65) return 'C+';
+  if (nilai >= 60) return 'C';
+  if (nilai >= 55) return 'C-';
+  return 'D';
+};
+
 /**
  * GET /api/nilai
  * Get grades filtered by mapel + semester + kelas
@@ -66,7 +90,7 @@ const getAll = async (req, res) => {
         bobotKeaktifan: d.bobot_keaktifan,
         bobotKehadiran: d.bobot_kehadiran,
         nilaiAkhir: d.nilai_akhir,
-        predikat: d.predikat,
+        predikat: gradeLetter(d.nilai_akhir),
       })),
     });
   } catch (error) {
@@ -89,13 +113,64 @@ const getBySiswa = async (req, res) => {
       where,
       include: {
         mata_pelajaran: { select: { nama: true, kkm: true } },
-        semester: { select: { nama: true, tahun_ajaran: { select: { kode: true } } } },
+        semester: { select: { id: true, nama: true, tahun_ajaran_id: true, tahun_ajaran: { select: { kode: true } } } },
       },
       orderBy: { mata_pelajaran: { nama: 'asc' } },
     });
 
+    const latestGrade = [...data].sort((a, b) => semesterOrderValue(b.semester) - semesterOrderValue(a.semester))[0];
+    let latestSummary = null;
+
+    if (latestGrade) {
+      const latestSemesterId = latestGrade.semester_id;
+      const latestSemester = latestGrade.semester;
+      const latestGrades = data.filter((d) => d.semester_id === latestSemesterId);
+      const latestAverage = averageNilai(latestGrades);
+      let latestRank = null;
+      let latestClassSize = null;
+
+      const rombelSiswa = await prisma.rombelSiswa.findFirst({
+        where: {
+          siswa_id: req.params.siswaId,
+          rombel: { tahun_ajaran_id: latestSemester.tahun_ajaran_id },
+        },
+        include: { rombel: { include: { siswa: { select: { siswa_id: true } } } } },
+      });
+
+      const classStudentIds = rombelSiswa?.rombel?.siswa?.map((s) => s.siswa_id) || [];
+      if (classStudentIds.length) {
+        const classGrades = await prisma.nilai.findMany({
+          where: {
+            semester_id: latestSemesterId,
+            siswa_id: { in: classStudentIds },
+          },
+          select: { siswa_id: true, nilai_akhir: true },
+        });
+        const grouped = new Map();
+        classGrades.forEach((grade) => {
+          if (!grouped.has(grade.siswa_id)) grouped.set(grade.siswa_id, []);
+          grouped.get(grade.siswa_id).push(grade);
+        });
+        const ranked = [...grouped.entries()]
+          .map(([siswaId, grades]) => ({ siswaId, average: averageNilai(grades) }))
+          .sort((a, b) => b.average - a.average);
+        latestClassSize = ranked.length;
+        const rankIndex = ranked.findIndex((item) => item.siswaId === req.params.siswaId);
+        latestRank = rankIndex >= 0 ? rankIndex + 1 : null;
+      }
+
+      latestSummary = {
+        latestSemesterId,
+        latestSemesterLabel: `${latestSemester.nama} - ${latestSemester.tahun_ajaran?.kode || '-'}`,
+        latestAverage: Math.round(latestAverage * 100) / 100,
+        latestRank,
+        latestClassSize,
+      };
+    }
+
     return res.status(200).json({
       message: 'Data nilai siswa berhasil diambil',
+      summary: latestSummary,
       data: data.map((d) => ({
         id: d.id,
         mataPelajaranId: d.mata_pelajaran_id,
@@ -105,10 +180,19 @@ const getBySiswa = async (req, res) => {
         semester: d.semester.nama,
         tahunAjaran: d.semester.tahun_ajaran.kode,
         nilaiTugas: d.nilai_tugas,
+        nilaiUH: d.nilai_uh,
         nilaiUTS: d.nilai_uts,
         nilaiUAS: d.nilai_uas,
+        nilaiKeaktifan: d.nilai_keaktifan,
+        nilaiKehadiran: d.nilai_kehadiran,
+        bobotTugas: d.bobot_tugas,
+        bobotUH: d.bobot_uh,
+        bobotUTS: d.bobot_uts,
+        bobotUAS: d.bobot_uas,
+        bobotKeaktifan: d.bobot_keaktifan,
+        bobotKehadiran: d.bobot_kehadiran,
         nilaiAkhir: d.nilai_akhir,
-        predikat: d.predikat,
+        predikat: gradeLetter(d.nilai_akhir),
       })),
     });
   } catch (error) {
@@ -156,11 +240,7 @@ const saveBatch = async (req, res) => {
         (kehadiran * bobotKehadiran / 100);
 
       // Determine predikat
-      let predikat = 'E';
-      if (nilaiAkhir >= 90) predikat = 'A';
-      else if (nilaiAkhir >= 80) predikat = 'B';
-      else if (nilaiAkhir >= 70) predikat = 'C';
-      else if (nilaiAkhir >= 60) predikat = 'D';
+      const predikat = gradeLetter(nilaiAkhir);
 
       const result = await prisma.nilai.upsert({
         where: {

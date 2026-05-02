@@ -40,6 +40,7 @@ router.get('/active-semester', verifyToken, async (req, res) => {
 });
 
 // All routes BELOW require Admin and Kurikulum roles
+router.get('/semester', verifyToken, semesterCtrl.getAll);
 router.use(verifyToken, authorizeRoles('Administrator', 'Kurikulum'));
 
 // ── Tahun Ajaran ────────────────────────────────
@@ -63,7 +64,6 @@ router.delete('/tahun-ajaran/:id',
 );
 
 // ── Semester ────────────────────────────────────
-router.get('/semester', semesterCtrl.getAll);
 router.post('/semester', 
   requireFields('name', 'academicYearId'),
   semesterCtrl.create

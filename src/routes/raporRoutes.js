@@ -20,12 +20,22 @@ router.get('/preview/:siswaId/:semesterId',
   raporCtrl.previewRapor
 );
 
+// Generate PDF transkrip all semesters
+router.get('/transkrip/:siswaId',
+  verifyToken,
+  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum', 'Siswa'),
+  validateUUID('siswaId'),
+  verifySiswaAccess('siswaId'),
+  raporCtrl.generateTranskrip
+);
+
 // Generate PDF rapor
 router.get('/:siswaId/:semesterId', 
   verifyToken, 
-  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum'),
+  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum', 'Siswa'),
   validateUUID('siswaId'),
   validateUUID('semesterId'),
+  verifySiswaAccess('siswaId'),
   raporCtrl.generateRapor
 );
 

@@ -10,6 +10,25 @@ const jwt = require('jsonwebtoken');
 
 const QR_EXPIRY_SECONDS = 180; // 3 menit
 const DAY_ORDER = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+const DAY_NAMES = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+const MONTH_NAMES = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+const JAKARTA_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+const pad2 = (value) => String(value).padStart(2, '0');
+
+const getJakartaPeriod = (date = new Date()) => {
+  const jakartaDate = new Date(date.getTime() + JAKARTA_OFFSET_MS);
+  const month = jakartaDate.getUTCMonth() + 1;
+  const year = jakartaDate.getUTCFullYear();
+
+  return {
+    dayName: DAY_NAMES[jakartaDate.getUTCDay()],
+    month,
+    year,
+    datePrefix: `${year}-${pad2(month)}`,
+    label: `${MONTH_NAMES[month - 1]} ${year}`,
+  };
+};
 
 const sortSchedule = (a, b) => {
   const dayA = DAY_ORDER.indexOf(a.hari);
@@ -430,18 +449,28 @@ const getWaliKelasDashboard = async (req, res) => {
 const getSiswaDashboard = async (req, res) => {
   try {
     const siswaId = req.user.userId;
+    const period = getJakartaPeriod();
 
-    // Get student's rombel → master_kelas
+    const activeSemester = await prisma.semester.findFirst({
+      where: { is_active: true },
+      include: { tahun_ajaran: true },
+    });
+
+    // Get student's rombel for the active semester academic year.
     const rombelSiswa = await prisma.rombelSiswa.findFirst({
-      where: { siswa_id: siswaId },
+      where: {
+        siswa_id: siswaId,
+        ...(activeSemester?.tahun_ajaran_id
+          ? { rombel: { tahun_ajaran_id: activeSemester.tahun_ajaran_id } }
+          : {}),
+      },
       include: { rombel: { include: { master_kelas: true } } },
     });
 
     const kelasId = rombelSiswa?.rombel?.master_kelas_id;
 
     // Get today's schedule
-    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
-    const today = days[new Date().getDay()];
+    const today = period.dayName;
 
     let todaySchedule = [];
     if (kelasId) {
@@ -450,61 +479,73 @@ const getSiswaDashboard = async (req, res) => {
         include: {
           mata_pelajaran: { select: { nama: true } },
           ruang_kelas: { select: { kode: true } },
+          guru: { select: { nama_lengkap: true } },
         },
         orderBy: { slot_index: 'asc' },
       });
 
-      const guruIds = jadwal.map((j) => j.guru_id).filter(Boolean);
-      const gurus = await prisma.user.findMany({
-        where: { id: { in: guruIds } },
-        select: { id: true, nama_lengkap: true },
-      });
-      const guruMap = {};
-      gurus.forEach((g) => (guruMap[g.id] = g.nama_lengkap));
-
       todaySchedule = jadwal.map((j) => ({
         id: j.id,
-        subject: j.mata_pelajaran.nama,
+        subject: j.mata_pelajaran?.nama || '-',
         startTime: j.jam_mulai,
         endTime: j.jam_selesai,
-        teacher: guruMap[j.guru_id] || '-',
+        teacher: j.guru?.nama_lengkap || '-',
         room: j.ruang_kelas?.kode || '-',
       }));
     }
 
     // Get latest announcements (Berita dari CMS)
-    const announcements = await prisma.kontenPublik.findMany({
+    const announcementsRaw = await prisma.kontenPublik.findMany({
       where: { tipe: 'BERITA', is_active: true },
       orderBy: { created_at: 'desc' },
       take: 5,
     });
 
-    // Get student's attendance summary
-    const kehadiran = await prisma.kehadiran.findMany({
-      where: { siswa_id: siswaId },
-    });
+    const announcements = announcementsRaw.map(a => ({
+      id: a.id,
+      title: a.judul,
+      content: a.konten,
+      imageUrl: a.gambar_url,
+      createdAt: a.created_at,
+    }));
+
+    const kehadiran = activeSemester
+      ? await prisma.kehadiran.findMany({
+          where: {
+            siswa_id: siswaId,
+            semester_id: activeSemester.id,
+            tanggal: { startsWith: period.datePrefix },
+          },
+        })
+      : [];
 
     const attendanceStats = {
       hadir: kehadiran.filter((k) => k.status === 'HADIR').length,
       sakit: kehadiran.filter((k) => k.status === 'SAKIT').length,
       izin: kehadiran.filter((k) => k.status === 'IZIN').length,
       alpa: kehadiran.filter((k) => k.status === 'ALPA').length,
+      periode: {
+        bulan: period.month,
+        tahun: period.year,
+        label: period.label,
+      },
     };
 
     return res.status(200).json({
       message: 'Dashboard siswa berhasil diambil',
       data: {
+        kelasId: kelasId || '',
         kelas: rombelSiswa?.rombel?.master_kelas?.nama || '-',
         hari: today,
         jadwalHariIni: todaySchedule,
-        pengumuman: announcements.map((a) => ({
-          id: a.id,
-          title: a.judul,
-          content: a.konten,
-          imageUrl: a.gambar_url,
-          createdAt: a.created_at,
-        })),
+        pengumuman: announcements,
         kehadiran: attendanceStats,
+        semesterAktif: activeSemester
+          ? {
+              id: activeSemester.id,
+              label: `${activeSemester.nama} - ${activeSemester.tahun_ajaran?.kode || '-'}`,
+            }
+          : null,
       },
     });
   } catch (error) {

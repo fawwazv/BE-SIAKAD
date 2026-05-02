@@ -23,6 +23,12 @@ const saveBatch = async (req, res) => {
       return res.status(400).json({ message: 'Data kehadiran tidak lengkap' });
     }
 
+    // Ambil semester aktif
+    const activeSemester = await prisma.semester.findFirst({
+      where: { is_active: true }
+    });
+    const semesterId = activeSemester ? activeSemester.id : null;
+
     // Upsert each record
     const results = [];
     for (const record of records) {
@@ -39,6 +45,7 @@ const saveBatch = async (req, res) => {
           keterangan: record.keterangan || null,
           pertemuan_ke: pertemuanKe ? parseInt(pertemuanKe) : null,
           topik: topik || null,
+          semester_id: semesterId,
         },
         create: {
           siswa_id: record.siswaId,
@@ -48,6 +55,7 @@ const saveBatch = async (req, res) => {
           keterangan: record.keterangan || null,
           pertemuan_ke: pertemuanKe ? parseInt(pertemuanKe) : null,
           topik: topik || null,
+          semester_id: semesterId,
         },
       });
       results.push(result);
@@ -120,13 +128,23 @@ const getRekap = async (req, res) => {
  */
 const getBySiswa = async (req, res) => {
   try {
+    const { semesterId } = req.query;
+    const whereClause = { siswa_id: req.params.siswaId };
+    
+    // Jika ada parameter semesterId, filter berdasarkan itu. Jika tidak, abaikan.
+    // Tetapi jika front-end memintanya untuk 'aktif', kita harus filter.
+    if (semesterId) {
+      whereClause.semester_id = semesterId;
+    }
+
     const data = await prisma.kehadiran.findMany({
-      where: { siswa_id: req.params.siswaId },
+      where: whereClause,
       include: {
         jadwal: {
           include: {
             mata_pelajaran: { select: { nama: true } },
             master_kelas: { select: { nama: true } },
+            guru: { select: { nama_lengkap: true } },
           },
         },
       },
@@ -144,6 +162,7 @@ const getBySiswa = async (req, res) => {
         topik: d.topik,
         mapel: d.jadwal.mata_pelajaran.nama,
         kelas: d.jadwal.master_kelas.nama,
+        guru: d.jadwal.guru?.nama_lengkap || '-',
       })),
     });
   } catch (error) {
@@ -451,6 +470,11 @@ const qrScan = async (req, res) => {
       });
     }
 
+    const activeSemester = await prisma.semester.findFirst({
+      where: { is_active: true }
+    });
+    const semesterId = activeSemester ? activeSemester.id : null;
+
     // ─── ALL CHECKS PASSED — Record Attendance ──────────────
     await prisma.kehadiran.upsert({
       where: {
@@ -464,6 +488,7 @@ const qrScan = async (req, res) => {
         status: 'HADIR',
         qr_token: qrToken,
         pertemuan_ke: sesi.pertemuan_ke,
+        semester_id: semesterId,
       },
       create: {
         siswa_id: siswaId,
@@ -472,6 +497,7 @@ const qrScan = async (req, res) => {
         status: 'HADIR',
         qr_token: qrToken,
         pertemuan_ke: sesi.pertemuan_ke,
+        semester_id: semesterId,
       },
     });
 

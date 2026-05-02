@@ -102,6 +102,7 @@ model Semester {
   tahun_ajaran TahunAjaran @relation(fields: [tahun_ajaran_id], references: [id], onDelete: Cascade)
   nilai        Nilai[]
   catatan_akademik CatatanAkademik[]
+  kehadiran    Kehadiran[]
 
   @@unique([nama, tahun_ajaran_id])
 }
@@ -230,9 +231,11 @@ model Kehadiran {
   pertemuan_ke Int?
   topik        String?
   qr_token     String?
+  semester_id  String?
 
-  siswa  User            @relation(fields: [siswa_id], references: [id], onDelete: Cascade)
-  jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+  siswa    User            @relation(fields: [siswa_id], references: [id], onDelete: Cascade)
+  jadwal   JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
+  semester Semester?       @relation(fields: [semester_id], references: [id], onDelete: SetNull)
 
   @@unique([siswa_id, jadwal_id, tanggal])
 }
