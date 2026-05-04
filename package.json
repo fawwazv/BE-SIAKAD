@@ -4,6 +4,7 @@
   "description": "",
   "main": "src/app.js",
   "scripts": {
+    "build": "npx prisma generate",
     "start": "node src/app.js",
     "dev": "npx nodemon src/app.js",
     "test": "jest --verbose"
