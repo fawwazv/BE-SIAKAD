@@ -24,18 +24,30 @@ model Role {
 // ─── USER (Akun Login) ──────────────────────────
 model User {
   id            String   @id @default(uuid())
+  auth_user_id  String?  @unique @db.Uuid
+  username      String?  @unique
   email         String   @unique
   password_hash String
   nama_lengkap  String   @default("")
   nomor_induk   String?  // NIP untuk guru, NISN untuk siswa
   role_id       Int
   status_aktif  Boolean  @default(true)
+  is_sso_allowed Boolean @default(true)
+  last_login_at DateTime?
+  force_password_change Boolean @default(true)
+  password_changed_at DateTime?
+  session_version Int @default(1)
+  failed_login_count Int @default(0)
+  locked_until DateTime?
   avatar_url    String?
   created_at    DateTime @default(now())
   updated_at    DateTime @updatedAt
 
   role          Role     @relation(fields: [role_id], references: [id])
   profile       UserProfile?
+  audit_logs    AuditLog[] @relation("AuditActorUser")
+  security_events UserSecurityEvent[] @relation("SecurityEventUser")
+  email_otps    UserEmailOtp[]
 
   // Relasi guru
   guru_mapel       GuruMapel[]
@@ -77,8 +89,75 @@ model UserProfile {
   rt              String?
   rw              String?
   kode_pos        String?
+  personal_email  String? @unique
+  personal_email_pending String?
+  personal_email_verified_at DateTime?
 
   user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+// ─── USER EMAIL OTP ───────────────────────────
+model UserEmailOtp {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id         String
+  email           String
+  purpose         String
+  otp_hash        String
+  expires_at      DateTime
+  consumed_at     DateTime?
+  failed_attempts Int      @default(0)
+  created_at      DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([email])
+  @@index([purpose])
+  @@index([expires_at])
+  @@map("user_email_otps")
+}
+
+// ─── AUDIT LOG ────────────────────────────────
+model AuditLog {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actor_auth_user_id String?  @db.Uuid
+  actor_user_id      String?
+  action             String
+  target_type        String?
+  target_id          String?
+  ip_address         String?
+  user_agent         String?
+  metadata           Json     @default("{}")
+  created_at         DateTime @default(now())
+
+  actor_user User? @relation("AuditActorUser", fields: [actor_user_id], references: [id], onDelete: SetNull)
+
+  @@index([actor_user_id])
+  @@index([actor_auth_user_id])
+  @@index([action])
+  @@index([created_at])
+  @@map("audit_logs")
+}
+
+// ─── USER SECURITY EVENTS ─────────────────────
+model UserSecurityEvent {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  auth_user_id     String?  @db.Uuid
+  academic_user_id String?
+  event            String
+  provider         String?
+  ip_address       String?
+  user_agent       String?
+  metadata         Json     @default("{}")
+  created_at       DateTime @default(now())
+
+  academic_user User? @relation("SecurityEventUser", fields: [academic_user_id], references: [id], onDelete: Cascade)
+
+  @@index([auth_user_id])
+  @@index([academic_user_id])
+  @@index([event])
+  @@index([created_at])
+  @@map("user_security_events")
 }
 
 // ─── TAHUN AJARAN ──────────────────────────────
@@ -237,7 +316,7 @@ model Kehadiran {
   jadwal   JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
   semester Semester?       @relation(fields: [semester_id], references: [id], onDelete: SetNull)
 
-  @@unique([siswa_id, jadwal_id, tanggal])
+  @@unique([siswa_id, jadwal_id, pertemuan_ke])
 }
 
 // ─── NILAI ─────────────────────────────────────
@@ -296,8 +375,9 @@ model JurnalMengajar {
   jadwal JadwalPelajaran @relation(fields: [jadwal_id], references: [id], onDelete: Cascade)
   guru   User            @relation(fields: [guru_id], references: [id], onDelete: Cascade)
 
-  // Satu jadwal hanya bisa punya satu jurnal per tanggal
-  @@unique([jadwal_id, tanggal])
+  // Satu jadwal hanya bisa punya satu jurnal untuk setiap nomor pertemuan.
+  // Beberapa jurnal boleh dibuat pada tanggal yang sama untuk mengisi pertemuan tertinggal.
+  @@unique([jadwal_id, pertemuan_ke])
 }
 
 // ─── CATATAN AKADEMIK ─────────────────────────
@@ -333,4 +413,5 @@ model SesiAbsensi {
 
   @@index([token])
   @@index([jadwal_id, tanggal])
+  @@index([jadwal_id, pertemuan_ke])
 }

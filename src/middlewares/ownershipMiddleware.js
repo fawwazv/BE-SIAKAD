@@ -6,6 +6,59 @@
 
 const prisma = require('../config/prisma');
 
+const waliRombelWhere = (userId) => ({
+  OR: [
+    { wali_kelas_id: userId },
+    { master_kelas: { wali_kelas_id: userId } },
+  ],
+});
+
+const canBypassWaliOwnership = (role) => ['Administrator', 'Kurikulum'].includes(role);
+
+const parseClasses = (classes = '') =>
+  `${classes}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const guruMapelMatchesClass = (mapping, className) =>
+  parseClasses(mapping.kelas_diampu).includes(className);
+
+const findOwnedRombel = async ({
+  userId,
+  role,
+  rombelId,
+  masterKelasId,
+  tahunAjaranId,
+  siswaId,
+}) => {
+  const where = {
+    ...(rombelId ? { id: rombelId } : {}),
+    ...(masterKelasId ? { master_kelas_id: masterKelasId } : {}),
+    ...(tahunAjaranId ? { tahun_ajaran_id: tahunAjaranId } : {}),
+    ...(siswaId ? { siswa: { some: { siswa_id: siswaId } } } : {}),
+  };
+
+  if (!canBypassWaliOwnership(role)) {
+    Object.assign(where, waliRombelWhere(userId));
+  }
+
+  return prisma.rombel.findFirst({
+    where,
+    include: {
+      master_kelas: true,
+      tahun_ajaran: true,
+      wali_kelas: { select: { id: true, nama_lengkap: true, nomor_induk: true } },
+      siswa: {
+        include: {
+          siswa: { select: { id: true, nama_lengkap: true, nomor_induk: true } },
+        },
+        orderBy: { siswa: { nama_lengkap: 'asc' } },
+      },
+    },
+  });
+};
+
 /**
  * Verify Self or Admin
  * 
@@ -125,7 +178,9 @@ const verifyGuruOwnsJadwal = async (req, res, next) => {
 
     const jadwal = await prisma.jadwalPelajaran.findUnique({
       where: { id: jadwalId },
-      select: { guru_id: true },
+      include: {
+        master_kelas: { select: { nama: true } },
+      },
     });
 
     if (!jadwal) {
@@ -133,6 +188,21 @@ const verifyGuruOwnsJadwal = async (req, res, next) => {
     }
 
     if (jadwal.guru_id !== req.user.userId) {
+      const mappedAssignment = await prisma.guruMapel.findFirst({
+        where: {
+          guru_id: req.user.userId,
+          mata_pelajaran_id: jadwal.mata_pelajaran_id,
+        },
+      });
+
+      if (mappedAssignment && guruMapelMatchesClass(mappedAssignment, jadwal.master_kelas.nama)) {
+        await prisma.jadwalPelajaran.update({
+          where: { id: jadwalId },
+          data: { guru_id: req.user.userId },
+        });
+        return next();
+      }
+
       return res.status(403).json({
         message: 'Anda hanya dapat mengelola jadwal yang ditugaskan kepada Anda',
       });
@@ -174,6 +244,9 @@ const preventSelfRoleChange = (req, res, next) => {
 };
 
 module.exports = {
+  waliRombelWhere,
+  canBypassWaliOwnership,
+  findOwnedRombel,
   verifySelfOrAdmin,
   verifySiswaAccess,
   verifyActiveUser,

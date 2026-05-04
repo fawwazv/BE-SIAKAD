@@ -5,12 +5,12 @@
 // ═══════════════════════════════════════════════
 
 const prisma = require('../config/prisma');
-const bcrypt = require('bcrypt');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const csv = require('csv-parser');
 const XLSX = require('xlsx');
+const { generateTemporaryPassword, hashPassword } = require('../utils/authSecurity');
 
 // Multer for import files
 const IMPORT_DIR = path.join(__dirname, '../../uploads/imports');
@@ -160,8 +160,8 @@ function userToExportRow(user) {
  * POST /api/import/users
  * Bulk import users from CSV/Excel
  * 
- * Expected columns: nama_lengkap, email, nomor_induk, role, password (optional)
- * If password is not provided, default is "password123"
+ * Expected columns: nama_lengkap, email, username, nomor_induk, role, password (optional)
+ * If password is not provided, a random temporary password is returned once.
  */
 const importUsers = async (req, res) => {
   let filePath = null;
@@ -187,8 +187,7 @@ const importUsers = async (req, res) => {
     }
 
     // Validate and process
-    const defaultPassword = await bcrypt.hash('password123', 10);
-    const results = { success: 0, failed: 0, errors: [] };
+    const results = { success: 0, failed: 0, errors: [], temporaryCredentials: [] };
 
     // Get all roles
     const roles = await prisma.role.findMany();
@@ -203,6 +202,7 @@ const importUsers = async (req, res) => {
         // Normalize column names (handle various casing/naming)
         const namaLengkap = valueOf(row, ['nama_lengkap', 'nama', 'name', 'Nama']);
         const email = valueOf(row, ['email', 'Email']);
+        const username = valueOf(row, ['username', 'Username', 'user_name']);
         const nomorInduk = valueOf(row, ['nomor_induk', 'nisn', 'nip', 'NISN', 'NIP']);
         const roleName = normalizeRoleName(valueOf(row, ['role', 'Role', 'peran']) || 'Siswa');
         const password = valueOf(row, ['password', 'Password']);
@@ -223,25 +223,38 @@ const importUsers = async (req, res) => {
         }
 
         // Check duplicate email
-        const existing = await prisma.user.findUnique({ where: { email } });
+        const existing = prisma.user.findFirst
+          ? await prisma.user.findFirst({
+              where: {
+                OR: [
+                  { email: { equals: email, mode: 'insensitive' } },
+                  ...(username ? [{ username: { equals: username, mode: 'insensitive' } }] : []),
+                  ...(nomorInduk ? [{ nomor_induk: nomorInduk }] : []),
+                ],
+              },
+            })
+          : await prisma.user.findUnique({ where: { email } });
         if (existing) {
           results.failed++;
-          results.errors.push(`Baris ${rowNum}: Email "${email}" sudah terdaftar`);
+          results.errors.push(`Baris ${rowNum}: Email, username, atau nomor induk sudah terdaftar`);
           continue;
         }
 
-        const hashedPw = password ? await bcrypt.hash(password, 10) : defaultPassword;
+        const plainPassword = password || generateTemporaryPassword();
+        const hashedPw = await hashPassword(plainPassword);
         const profileData = buildProfile(row);
 
         await prisma.$transaction(async (tx) => {
           const user = await tx.user.create({
             data: {
               email,
+              username: username || null,
               password_hash: hashedPw,
               nama_lengkap: namaLengkap,
               nomor_induk: nomorInduk || null,
               role_id: roleId,
               status_aktif: isActiveStatus(status),
+              force_password_change: true,
             },
           });
 
@@ -254,6 +267,16 @@ const importUsers = async (req, res) => {
         });
 
         results.success++;
+        if (!password) {
+          results.temporaryCredentials.push({
+            row: rowNum,
+            name: namaLengkap,
+            email,
+            username: username || '',
+            nomorInduk: nomorInduk || '',
+            password: plainPassword,
+          });
+        }
       } catch (rowError) {
         results.failed++;
         results.errors.push(`Baris ${rowNum}: ${rowError.message}`);
@@ -280,7 +303,7 @@ const importUsers = async (req, res) => {
  * Download CSV template for user import
  */
 const getTemplate = (req, res) => {
-  const csvContent = 'nama_lengkap,email,nomor_induk,role,password,status,jenis_kelamin,tanggal_lahir,tempat_lahir,agama,nik,nama_ibu_kandung,status_perkawinan,provinsi,kota_kabupaten,kecamatan,kelurahan,detail_alamat,rt,rw,kode_pos\nAhmad Siswa,ahmad@siakad.sch.id,0012345678,Siswa,password123,Aktif,L,2008-01-15,Cianjur,Islam,3203011501080001,Siti Aminah,Belum Menikah,Jawa Barat,Kab. Cianjur,Cikalong,Sukamaju,Jl. Raya Cikalong,001,002,43291\nBudi Guru,budi@siakad.sch.id,198501152010011001,Guru Mapel,password123,Aktif,L,1985-01-15,Cianjur,Islam,3203011501850001,,Menikah,Jawa Barat,Kab. Cianjur,Cikalong,Sukamaju,Jl. Pendidikan,003,004,43291';
+  const csvContent = 'nama_lengkap,email,username,nomor_induk,role,password,status,jenis_kelamin,tanggal_lahir,tempat_lahir,agama,nik,nama_ibu_kandung,status_perkawinan,provinsi,kota_kabupaten,kecamatan,kelurahan,detail_alamat,rt,rw,kode_pos\nAhmad Siswa,ahmad@siakad.sch.id,ahmad.siswa,0012345678,Siswa,,Aktif,L,2008-01-15,Cianjur,Islam,3203011501080001,Siti Aminah,Belum Menikah,Jawa Barat,Kab. Cianjur,Cikalong,Sukamaju,Jl. Raya Cikalong,001,002,43291\nBudi Guru,budi@siakad.sch.id,budi.guru,198501152010011001,Guru Mapel,,Aktif,L,1985-01-15,Cianjur,Islam,3203011501850001,,Menikah,Jawa Barat,Kab. Cianjur,Cikalong,Sukamaju,Jl. Pendidikan,003,004,43291';
 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=template_import_users.csv');

@@ -14,7 +14,7 @@ router.use(verifyToken);
 // GET /api/promosi/rombel/:id
 // Accessible by Wali Kelas & Kurikulum
 router.get('/rombel/:id', 
-  authorizeRoles('Wali Kelas', 'Kurikulum', 'Administrator'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Kurikulum', 'Administrator'),
   validateUUID('id'),
   promosiCtrl.getSiswaPromosi
 );
@@ -22,7 +22,7 @@ router.get('/rombel/:id',
 // POST /api/promosi/lock
 // Accessible by Wali Kelas (to lock decisions)
 router.post('/lock', 
-  authorizeRoles('Wali Kelas', 'Administrator'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator'),
   requireFields('rombelId', 'decisions'), // decisions: [{ siswaId, status }]
   promosiCtrl.lockPromosi
 );

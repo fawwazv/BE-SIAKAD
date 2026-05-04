@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════
 
 const prisma = require('../config/prisma');
+const { canBypassWaliOwnership, findOwnedRombel } = require('../middlewares/ownershipMiddleware');
 
 /**
  * GET /api/promosi/rombel/:id
@@ -13,22 +14,15 @@ const getSiswaPromosi = async (req, res) => {
   try {
     const rombelId = req.params.id;
 
-    // Get rombel info
-    const rombel = await prisma.rombel.findUnique({
-      where: { id: rombelId },
-      include: {
-        siswa: {
-          include: {
-            siswa: {
-              select: { id: true, nama_lengkap: true, nomor_induk: true },
-            },
-          },
-        },
-      },
+    const rombel = await findOwnedRombel({
+      userId: req.user.userId,
+      role: req.user.role,
+      rombelId,
     });
 
     if (!rombel) {
-      return res.status(404).json({ message: 'Rombel tidak ditemukan' });
+      const status = canBypassWaliOwnership(req.user.role) ? 404 : 403;
+      return res.status(status).json({ message: 'Rombel tidak ditemukan atau bukan kelas wali Anda' });
     }
 
     const siswaList = rombel.siswa.map((rs) => rs.siswa);
@@ -41,7 +35,7 @@ const getSiswaPromosi = async (req, res) => {
     });
     const semesterIds = semesters.map(s => s.id);
 
-    // Get all nilai and kehadiran for these students in this semester
+    // Get all nilai and kehadiran for these students in this academic year.
     const nilaiData = await prisma.nilai.findMany({
       where: {
         siswa_id: { in: siswaList.map((s) => s.id) },
@@ -56,7 +50,8 @@ const getSiswaPromosi = async (req, res) => {
     // Here we just find kehadiran by siswa.
     const kehadiranData = await prisma.kehadiran.findMany({
       where: {
-        siswa_id: { in: siswaList.map((s) => s.id) }
+        siswa_id: { in: siswaList.map((s) => s.id) },
+        semester_id: { in: semesterIds },
       },
       select: { siswa_id: true, status: true }
     });
@@ -67,10 +62,15 @@ const getSiswaPromosi = async (req, res) => {
       const sNilai = nilaiData.filter((n) => n.siswa_id === siswa_id);
       const sKehadiran = kehadiranData.filter((k) => k.siswa_id === siswa_id);
 
-      // Hitung rata-rata nilai
-      const avgNilai = sNilai.length > 0 
+      const missingData = [];
+      if (sNilai.length === 0) missingData.push('nilai');
+      if (sKehadiran.length === 0) missingData.push('kehadiran');
+      const isDataComplete = missingData.length === 0;
+
+      // Hitung rata-rata nilai tanpa fallback dummy.
+      const avgNilai = sNilai.length > 0
         ? sNilai.reduce((acc, curr) => acc + curr.nilai_akhir, 0) / sNilai.length 
-        : 85.0; // Default jika kosong (sesuai persetujuan untuk seed dummy UI)
+        : 0;
 
       // Hitung persentase kehadiran
       let hadirCount = 0;
@@ -78,12 +78,14 @@ const getSiswaPromosi = async (req, res) => {
       sKehadiran.forEach(k => {
         if (k.status === 'HADIR') hadirCount++;
       });
-      const percentHadir = totalCount > 0 ? (hadirCount / totalCount) * 100 : 95.0; // Default 95%
+      const percentHadir = totalCount > 0 ? (hadirCount / totalCount) * 100 : 0;
 
       // Tentukan status default jika belum ada
       let status = status_promosi;
       if (!status) {
-        status = (avgNilai >= 75 && percentHadir >= 80) ? 'NAIK' : 'TINGGAL';
+        status = isDataComplete
+          ? ((avgNilai >= 75 && percentHadir >= 80) ? 'NAIK' : 'TINGGAL')
+          : 'PERLU_CEK';
       }
 
       return {
@@ -92,7 +94,9 @@ const getSiswaPromosi = async (req, res) => {
         nisn: rs.siswa.nomor_induk || '-',
         nilaiRataRata: avgNilai,
         persentaseKehadiran: Math.round(percentHadir),
-        status: status === 'NAIK' ? 'naik' : 'tinggal' // Map back to frontend enum value
+        status: status === 'NAIK' ? 'naik' : (status === 'TINGGAL' ? 'tinggal' : 'perluCek'),
+        isDataComplete,
+        missingData,
       };
     });
 
@@ -119,8 +123,29 @@ const lockPromosi = async (req, res) => {
       return res.status(400).json({ message: 'Format decisions tidak valid' });
     }
 
-    const rombel = await prisma.rombel.findUnique({ where: { id: rombelId } });
-    if (!rombel) return res.status(404).json({ message: 'Rombel tidak ditemukan' });
+    const rombel = await findOwnedRombel({
+      userId: req.user.userId,
+      role: req.user.role,
+      rombelId,
+    });
+    if (!rombel) {
+      const status = canBypassWaliOwnership(req.user.role) ? 404 : 403;
+      return res.status(status).json({ message: 'Rombel tidak ditemukan atau bukan kelas wali Anda' });
+    }
+
+    const siswaIds = new Set(rombel.siswa.map((s) => s.siswa_id));
+    if (decisions.length !== siswaIds.size) {
+      return res.status(400).json({ message: 'Keputusan promosi harus mencakup semua siswa di rombel' });
+    }
+
+    for (const dec of decisions) {
+      if (!siswaIds.has(dec.siswaId)) {
+        return res.status(400).json({ message: 'Terdapat siswa yang bukan anggota rombel ini' });
+      }
+      if (!['naik', 'tinggal'].includes(dec.status)) {
+        return res.status(400).json({ message: 'Semua siswa harus diputuskan naik atau tinggal kelas sebelum dikunci' });
+      }
+    }
 
     // Gunakan transaksi untuk update batch
     await prisma.$transaction(async (tx) => {

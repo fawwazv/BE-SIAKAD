@@ -10,6 +10,128 @@ const jwt = require('jsonwebtoken');
 
 const QR_EXPIRY_SECONDS = 180; // 3 menit
 
+const parseClasses = (classes = '') =>
+  `${classes}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const getMappedTeacherForAttendance = (mappings, jadwal) =>
+  mappings.find(
+    (mapping) =>
+      mapping.mata_pelajaran_id === jadwal.mata_pelajaran_id &&
+      parseClasses(mapping.kelas_diampu).includes(jadwal.master_kelas.nama)
+  );
+
+const getActiveSemesterId = async () => {
+  const activeSemester = await prisma.semester.findFirst({
+    where: { is_active: true },
+    select: { id: true },
+  });
+  return activeSemester?.id || null;
+};
+
+const parseMeetingNumber = (value) => {
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+const getSessionJournal = ({ jadwalId, tanggal, pertemuanKe }) =>
+  prisma.jurnalMengajar.findFirst({
+    where: {
+      jadwal_id: jadwalId,
+      ...(pertemuanKe ? { pertemuan_ke: pertemuanKe } : { tanggal }),
+    },
+    select: {
+      pertemuan_ke: true,
+      judul_materi: true,
+      deskripsi_kegiatan: true,
+    },
+  });
+
+const getActiveRombelForJadwal = async (jadwalId) => {
+  const jadwal = await prisma.jadwalPelajaran.findUnique({
+    where: { id: jadwalId },
+    select: { master_kelas_id: true },
+  });
+  if (!jadwal) return null;
+
+  const activeTahunAjaran = await prisma.tahunAjaran.findFirst({
+    where: { is_active: true },
+    select: { id: true },
+  });
+  if (!activeTahunAjaran) return null;
+
+  return prisma.rombel.findFirst({
+    where: {
+      master_kelas_id: jadwal.master_kelas_id,
+      tahun_ajaran_id: activeTahunAjaran.id,
+    },
+    include: { siswa: { select: { siswa_id: true } } },
+  });
+};
+
+const finalizeAttendanceSession = async ({ jadwalId, tanggal, pertemuanKe }) => {
+  const [semesterId, jurnal, rombel] = await Promise.all([
+    getActiveSemesterId(),
+    getSessionJournal({ jadwalId, tanggal, pertemuanKe }),
+    getActiveRombelForJadwal(jadwalId),
+  ]);
+
+  if (!rombel) return { totalStudents: 0, createdAlpa: 0 };
+
+  const studentIds = rombel.siswa.map((item) => item.siswa_id);
+  const existingRecords = await prisma.kehadiran.findMany({
+    where: {
+      jadwal_id: jadwalId,
+      pertemuan_ke: pertemuanKe,
+      siswa_id: { in: studentIds },
+    },
+    select: { siswa_id: true },
+  });
+  const existingStudentIds = new Set(existingRecords.map((item) => item.siswa_id));
+  const missingStudentIds = studentIds.filter((id) => !existingStudentIds.has(id));
+
+  const finalPertemuanKe = jurnal?.pertemuan_ke || pertemuanKe || null;
+  const topik = jurnal?.judul_materi || null;
+  const keterangan = jurnal?.deskripsi_kegiatan || null;
+
+  await prisma.kehadiran.updateMany({
+    where: {
+      jadwal_id: jadwalId,
+      pertemuan_ke: finalPertemuanKe,
+      siswa_id: { in: studentIds },
+    },
+    data: {
+      ...(finalPertemuanKe ? { pertemuan_ke: finalPertemuanKe } : {}),
+      ...(topik ? { topik } : {}),
+      ...(keterangan ? { keterangan } : {}),
+      ...(semesterId ? { semester_id: semesterId } : {}),
+    },
+  });
+
+  if (missingStudentIds.length > 0) {
+    await prisma.kehadiran.createMany({
+      data: missingStudentIds.map((siswaId) => ({
+        siswa_id: siswaId,
+        jadwal_id: jadwalId,
+        tanggal,
+        status: 'ALPA',
+        pertemuan_ke: finalPertemuanKe,
+        topik,
+        keterangan,
+        semester_id: semesterId,
+      })),
+      skipDuplicates: true,
+    });
+  }
+
+  return {
+    totalStudents: studentIds.length,
+    createdAlpa: missingStudentIds.length,
+  };
+};
+
 /**
  * POST /api/kehadiran/batch
  * Save attendance for a class session (batch)
@@ -23,28 +145,37 @@ const saveBatch = async (req, res) => {
       return res.status(400).json({ message: 'Data kehadiran tidak lengkap' });
     }
 
-    // Ambil semester aktif
-    const activeSemester = await prisma.semester.findFirst({
-      where: { is_active: true }
-    });
-    const semesterId = activeSemester ? activeSemester.id : null;
+    const [semesterId, jurnal] = await Promise.all([
+      getActiveSemesterId(),
+      getSessionJournal({
+        jadwalId,
+        tanggal,
+        pertemuanKe: parseMeetingNumber(pertemuanKe),
+      }),
+    ]);
+    const finalPertemuanKe = parseMeetingNumber(pertemuanKe) || jurnal?.pertemuan_ke || null;
+    if (!finalPertemuanKe) {
+      return res.status(400).json({ message: 'Pertemuan ke- wajib diisi' });
+    }
+    const finalTopik = topik || jurnal?.judul_materi || null;
+    const finalKeterangan = jurnal?.deskripsi_kegiatan || null;
 
     // Upsert each record
     const results = [];
     for (const record of records) {
       const result = await prisma.kehadiran.upsert({
         where: {
-          siswa_id_jadwal_id_tanggal: {
+          siswa_id_jadwal_id_pertemuan_ke: {
             siswa_id: record.siswaId,
             jadwal_id: jadwalId,
-            tanggal: tanggal,
+            pertemuan_ke: finalPertemuanKe,
           },
         },
         update: {
           status: record.status,
-          keterangan: record.keterangan || null,
-          pertemuan_ke: pertemuanKe ? parseInt(pertemuanKe) : null,
-          topik: topik || null,
+          keterangan: record.keterangan || finalKeterangan,
+          pertemuan_ke: finalPertemuanKe,
+          topik: finalTopik,
           semester_id: semesterId,
         },
         create: {
@@ -52,9 +183,9 @@ const saveBatch = async (req, res) => {
           jadwal_id: jadwalId,
           tanggal: tanggal,
           status: record.status,
-          keterangan: record.keterangan || null,
-          pertemuan_ke: pertemuanKe ? parseInt(pertemuanKe) : null,
-          topik: topik || null,
+          keterangan: record.keterangan || finalKeterangan,
+          pertemuan_ke: finalPertemuanKe,
+          topik: finalTopik,
           semester_id: semesterId,
         },
       });
@@ -78,9 +209,13 @@ const saveBatch = async (req, res) => {
 const getRekap = async (req, res) => {
   try {
     const { jadwalId } = req.params;
+    const { semesterId } = req.query;
 
     const data = await prisma.kehadiran.findMany({
-      where: { jadwal_id: jadwalId },
+      where: {
+        jadwal_id: jadwalId,
+        ...(semesterId ? { semester_id: semesterId } : {}),
+      },
       include: {
         siswa: { select: { id: true, nama_lengkap: true, nomor_induk: true } },
       },
@@ -92,6 +227,7 @@ const getRekap = async (req, res) => {
     data.forEach((d) => {
       if (!groupedMap[d.siswa_id]) {
         groupedMap[d.siswa_id] = {
+          siswaId: d.siswa.id,
           name: d.siswa.nama_lengkap,
           nisn: d.siswa.nomor_induk || '-',
           attendance: [],
@@ -130,11 +266,12 @@ const getBySiswa = async (req, res) => {
   try {
     const { semesterId } = req.query;
     const whereClause = { siswa_id: req.params.siswaId };
-    
-    // Jika ada parameter semesterId, filter berdasarkan itu. Jika tidak, abaikan.
-    // Tetapi jika front-end memintanya untuk 'aktif', kita harus filter.
+
+    // Beberapa data presensi lama/dev bisa tersimpan tanpa semester_id saat
+    // semester aktif belum dikonfigurasi. Tetap tampilkan agar riwayat siswa
+    // membaca hasil absensi manual maupun QR yang sudah masuk.
     if (semesterId) {
-      whereClause.semester_id = semesterId;
+      whereClause.OR = [{ semester_id: semesterId }, { semester_id: null }];
     }
 
     const data = await prisma.kehadiran.findMany({
@@ -151,19 +288,53 @@ const getBySiswa = async (req, res) => {
       orderBy: { tanggal: 'desc' },
     });
 
+    const journalPairs = data.map((item) => ({
+      jadwal_id: item.jadwal_id,
+      tanggal: item.tanggal,
+      pertemuan_ke: item.pertemuan_ke,
+    }));
+    const journals = journalPairs.length > 0
+      ? await prisma.jurnalMengajar.findMany({
+          where: {
+            OR: journalPairs.map((pair) => ({
+              jadwal_id: pair.jadwal_id,
+              ...(pair.pertemuan_ke ? { pertemuan_ke: pair.pertemuan_ke } : { tanggal: pair.tanggal }),
+            })),
+          },
+          select: {
+            jadwal_id: true,
+            tanggal: true,
+            pertemuan_ke: true,
+            judul_materi: true,
+            deskripsi_kegiatan: true,
+          },
+        })
+      : [];
+    const journalMap = new Map(
+      journals.map((journal) => [`${journal.jadwal_id}:${journal.pertemuan_ke}`, journal])
+    );
+
+    const mappings = await prisma.guruMapel.findMany({
+      include: { guru: { select: { nama_lengkap: true } } },
+    });
+
     return res.status(200).json({
       message: 'Riwayat kehadiran berhasil diambil',
-      data: data.map((d) => ({
-        id: d.id,
-        tanggal: d.tanggal,
-        status: d.status,
-        keterangan: d.keterangan,
-        pertemuanKe: d.pertemuan_ke,
-        topik: d.topik,
-        mapel: d.jadwal.mata_pelajaran.nama,
-        kelas: d.jadwal.master_kelas.nama,
-        guru: d.jadwal.guru?.nama_lengkap || '-',
-      })),
+      data: data.map((d) => {
+        const mappedTeacher = getMappedTeacherForAttendance(mappings, d.jadwal);
+        const journal = journalMap.get(`${d.jadwal_id}:${d.pertemuan_ke}`);
+        return {
+          id: d.id,
+          tanggal: d.tanggal,
+          status: d.status,
+          keterangan: d.keterangan || journal?.deskripsi_kegiatan || '',
+          pertemuanKe: d.pertemuan_ke || journal?.pertemuan_ke || null,
+          topik: d.topik || journal?.judul_materi || '',
+          mapel: d.jadwal.mata_pelajaran.nama,
+          kelas: d.jadwal.master_kelas.nama,
+          guru: mappedTeacher?.guru?.nama_lengkap || d.jadwal.guru?.nama_lengkap || '-',
+        };
+      }),
     });
   } catch (error) {
     console.error('Kehadiran BySiswa Error:', error);
@@ -182,11 +353,12 @@ const getHistory = async (req, res) => {
       orderBy: { tanggal: 'asc' },
     });
 
-    // Group by tanggal
+    // Group by meeting number so multiple meetings on the same date stay separate.
     const grouped = {};
     data.forEach((d) => {
-      if (!grouped[d.tanggal]) {
-        grouped[d.tanggal] = {
+      const key = d.pertemuan_ke || d.tanggal;
+      if (!grouped[key]) {
+        grouped[key] = {
           tanggal: d.tanggal,
           pertemuanKe: d.pertemuan_ke,
           topik: d.topik,
@@ -222,8 +394,9 @@ const generateQR = async (req, res) => {
   try {
     const { jadwalId, tanggal, pertemuanKe } = req.body;
     const guruId = req.user.userId;
+    const meetingNumber = parseMeetingNumber(pertemuanKe);
 
-    if (!jadwalId || !tanggal || !pertemuanKe) {
+    if (!jadwalId || !tanggal || !meetingNumber) {
       return res.status(400).json({ message: 'jadwalId, tanggal, dan pertemuanKe wajib diisi' });
     }
 
@@ -237,9 +410,9 @@ const generateQR = async (req, res) => {
       return res.status(404).json({ message: 'Jadwal tidak ditemukan' });
     }
 
-    // Deactivate all previous tokens for this jadwal+tanggal
+    // Deactivate all previous tokens for this jadwal+meeting number.
     await prisma.sesiAbsensi.updateMany({
-      where: { jadwal_id: jadwalId, tanggal, is_active: true },
+      where: { jadwal_id: jadwalId, pertemuan_ke: meetingNumber, is_active: true },
       data: { is_active: false },
     });
 
@@ -252,7 +425,7 @@ const generateQR = async (req, res) => {
         sessionId,
         jadwalId,
         tanggal,
-        pertemuanKe: parseInt(pertemuanKe),
+        pertemuanKe: meetingNumber,
         guruId,
         type: 'qr_attendance',
       },
@@ -270,7 +443,7 @@ const generateQR = async (req, res) => {
         jadwal_id: jadwalId,
         guru_id: guruId,
         tanggal,
-        pertemuan_ke: parseInt(pertemuanKe),
+        pertemuan_ke: meetingNumber,
         token,
         expired_at: expiredAt,
         is_active: true,
@@ -282,7 +455,7 @@ const generateQR = async (req, res) => {
       token,
       jadwalId,
       tanggal,
-      pertemuanKe: parseInt(pertemuanKe),
+      pertemuanKe: meetingNumber,
     });
 
     return res.status(200).json({
@@ -363,6 +536,13 @@ const qrScan = async (req, res) => {
       return res.status(400).json({
         message: 'Data QR Code tidak sesuai.',
         code: 'QR_MISMATCH',
+      });
+    }
+    const meetingNumber = parseMeetingNumber(decoded.pertemuanKe);
+    if (!meetingNumber) {
+      return res.status(400).json({
+        message: 'Data pertemuan pada QR Code tidak valid.',
+        code: 'QR_INVALID',
       });
     }
 
@@ -455,10 +635,10 @@ const qrScan = async (req, res) => {
     // ─── STEP 4: Check Duplicate Attendance ──────────────────
     const existingAttendance = await prisma.kehadiran.findUnique({
       where: {
-        siswa_id_jadwal_id_tanggal: {
+        siswa_id_jadwal_id_pertemuan_ke: {
           siswa_id: siswaId,
           jadwal_id: jadwalId,
-          tanggal: tanggal,
+          pertemuan_ke: meetingNumber,
         },
       },
     });
@@ -470,24 +650,26 @@ const qrScan = async (req, res) => {
       });
     }
 
-    const activeSemester = await prisma.semester.findFirst({
-      where: { is_active: true }
-    });
-    const semesterId = activeSemester ? activeSemester.id : null;
+    const [semesterId, jurnal] = await Promise.all([
+      getActiveSemesterId(),
+      getSessionJournal({ jadwalId, tanggal, pertemuanKe: meetingNumber }),
+    ]);
 
     // ─── ALL CHECKS PASSED — Record Attendance ──────────────
     await prisma.kehadiran.upsert({
       where: {
-        siswa_id_jadwal_id_tanggal: {
+        siswa_id_jadwal_id_pertemuan_ke: {
           siswa_id: siswaId,
           jadwal_id: jadwalId,
-          tanggal: tanggal,
+          pertemuan_ke: meetingNumber,
         },
       },
       update: {
         status: 'HADIR',
         qr_token: qrToken,
-        pertemuan_ke: sesi.pertemuan_ke,
+        pertemuan_ke: jurnal?.pertemuan_ke || meetingNumber,
+        topik: jurnal?.judul_materi || null,
+        keterangan: jurnal?.deskripsi_kegiatan || null,
         semester_id: semesterId,
       },
       create: {
@@ -496,7 +678,9 @@ const qrScan = async (req, res) => {
         tanggal: tanggal,
         status: 'HADIR',
         qr_token: qrToken,
-        pertemuan_ke: sesi.pertemuan_ke,
+        pertemuan_ke: jurnal?.pertemuan_ke || meetingNumber,
+        topik: jurnal?.judul_materi || null,
+        keterangan: jurnal?.deskripsi_kegiatan || null,
         semester_id: semesterId,
       },
     });
@@ -513,32 +697,39 @@ const qrScan = async (req, res) => {
 
 /**
  * POST /api/kehadiran/end-session
- * End attendance session — deactivate all active tokens for this jadwal+tanggal
- * Body: { jadwalId, tanggal }
+ * End attendance session — deactivate all active tokens for this jadwal+pertemuanKe
+ * Body: { jadwalId, tanggal, pertemuanKe }
  */
 const endSession = async (req, res) => {
   try {
-    const { jadwalId, tanggal } = req.body;
+    const { jadwalId, tanggal, pertemuanKe } = req.body;
     const guruId = req.user.userId;
+    const meetingNumber = parseMeetingNumber(pertemuanKe);
 
-    if (!jadwalId || !tanggal) {
-      return res.status(400).json({ message: 'jadwalId dan tanggal wajib diisi' });
+    if (!jadwalId || !tanggal || !meetingNumber) {
+      return res.status(400).json({ message: 'jadwalId, tanggal, dan pertemuanKe wajib diisi' });
     }
 
-    // Deactivate all active sessions for this jadwal+tanggal
-    const result = await prisma.sesiAbsensi.updateMany({
-      where: {
-        jadwal_id: jadwalId,
-        tanggal,
-        guru_id: guruId,
-        is_active: true,
-      },
-      data: { is_active: false },
-    });
+    const [finalized, result] = await Promise.all([
+      finalizeAttendanceSession({ jadwalId, tanggal, pertemuanKe: meetingNumber }),
+      prisma.sesiAbsensi.updateMany({
+        where: {
+          jadwal_id: jadwalId,
+          pertemuan_ke: meetingNumber,
+          guru_id: guruId,
+          is_active: true,
+        },
+        data: { is_active: false },
+      }),
+    ]);
 
     return res.status(200).json({
       message: `Sesi absensi ditutup. ${result.count} token dinonaktifkan.`,
-      data: { deactivatedCount: result.count },
+      data: {
+        deactivatedCount: result.count,
+        totalStudents: finalized.totalStudents,
+        createdAlpa: finalized.createdAlpa,
+      },
     });
   } catch (error) {
     console.error('EndSession Error:', error);
@@ -547,19 +738,20 @@ const endSession = async (req, res) => {
 };
 
 /**
- * GET /api/kehadiran/live-attendance?jadwalId=&tanggal=
+ * GET /api/kehadiran/live-attendance?jadwalId=&tanggal=&pertemuanKe=
  * Returns list of siswaId who are marked HADIR in the current session.
  * Used for real-time polling from teacher dashboard.
  */
 const getSessionAttendance = async (req, res) => {
   try {
-    const { jadwalId, tanggal } = req.query;
-    if (!jadwalId || !tanggal) {
-      return res.status(400).json({ message: 'jadwalId dan tanggal wajib diisi' });
+    const { jadwalId, tanggal, pertemuanKe } = req.query;
+    const meetingNumber = parseMeetingNumber(pertemuanKe);
+    if (!jadwalId || !tanggal || !meetingNumber) {
+      return res.status(400).json({ message: 'jadwalId, tanggal, dan pertemuanKe wajib diisi' });
     }
 
     const records = await prisma.kehadiran.findMany({
-      where: { jadwal_id: jadwalId, tanggal, status: 'HADIR' },
+      where: { jadwal_id: jadwalId, pertemuan_ke: meetingNumber, status: 'HADIR' },
       select: { siswa_id: true },
     });
 

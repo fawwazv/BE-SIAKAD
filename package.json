@@ -12,12 +12,14 @@
     "@prisma/adapter-pg": "^6.4.1",
     "@prisma/client": "^6.19.3",
     "bcrypt": "^5.1.1",
+    "cloudinary": "^2.10.0",
     "cors": "^2.8.5",
     "csv-parser": "^3.2.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.1.1",
+    "nodemailer": "^8.0.7",
     "pdfkit": "^0.18.0",
     "pg": "^8.13.3",
     "xlsx": "^0.18.5"
@@ -32,7 +34,11 @@
     "seed": "node prisma/seed.js"
   },
   "jest": {
-    "testMatch": ["**/test/**/*.test.js"],
-    "testPathIgnorePatterns": ["/node_modules/"]
+    "testMatch": [
+      "**/test/**/*.test.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/"
+    ]
   }
 }

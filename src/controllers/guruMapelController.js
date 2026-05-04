@@ -5,6 +5,84 @@
 
 const prisma = require('../config/prisma');
 
+const parseClasses = (classes = '') =>
+  `${classes}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const normalizeClasses = (classes = '') => [...new Set(parseClasses(classes))].join(', ');
+
+const getMasterKelasIdsByNames = async (classes) => {
+  const classNames = parseClasses(classes);
+  if (classNames.length === 0) return [];
+
+  const rows = await prisma.masterKelas.findMany({
+    where: { nama: { in: classNames } },
+    select: { id: true },
+  });
+
+  return rows.map((row) => row.id);
+};
+
+const syncSchedulesForMapping = async ({ teacherId, subjectId, classes }) => {
+  if (!teacherId || !subjectId) return { count: 0 };
+
+  const masterKelasIds = await getMasterKelasIdsByNames(classes);
+  if (masterKelasIds.length === 0) return { count: 0 };
+
+  return prisma.jadwalPelajaran.updateMany({
+    where: {
+      mata_pelajaran_id: subjectId,
+      master_kelas_id: { in: masterKelasIds },
+    },
+    data: { guru_id: teacherId },
+  });
+};
+
+const findClassSubjectConflicts = async ({ subjectId, classes, excludeId = null }) => {
+  const selectedClasses = parseClasses(classes);
+  if (!subjectId || selectedClasses.length === 0) return [];
+
+  const existingMappings = await prisma.guruMapel.findMany({
+    where: {
+      mata_pelajaran_id: subjectId,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    include: {
+      guru: { select: { nama_lengkap: true } },
+      mata_pelajaran: { select: { nama: true } },
+    },
+  });
+
+  const conflicts = [];
+  for (const mapping of existingMappings) {
+    const existingClasses = parseClasses(mapping.kelas_diampu);
+    const overlap = selectedClasses.filter((className) => existingClasses.includes(className));
+    overlap.forEach((className) => {
+      conflicts.push({
+        className,
+        subject: mapping.mata_pelajaran?.nama || 'Mata Pelajaran',
+        teacher: mapping.guru?.nama_lengkap || 'Guru lain',
+      });
+    });
+  }
+
+  return conflicts;
+};
+
+const sendConflictResponse = (res, conflicts) => {
+  const conflictText = conflicts
+    .map((item) => `${item.className} - ${item.subject} sudah dipetakan ke ${item.teacher}`)
+    .join('; ');
+
+  return res.status(409).json({
+    message: `Pemetaan duplikat tidak diizinkan. ${conflictText}`,
+    errorCode: 'DUPLICATE_CLASS_SUBJECT_MAPPING',
+    conflicts,
+  });
+};
+
 const getAll = async (req, res) => {
   try {
     const { search = '' } = req.query;
@@ -76,18 +154,33 @@ const create = async (req, res) => {
     if (!teacherId || !subjectId) {
       return res.status(400).json({ message: 'Guru dan mata pelajaran wajib diisi' });
     }
+    const normalizedClasses = normalizeClasses(classes);
+    if (!normalizedClasses) {
+      return res.status(400).json({ message: 'Minimal satu kelas yang diampu wajib dipilih' });
+    }
+
+    const conflicts = await findClassSubjectConflicts({
+      subjectId,
+      classes: normalizedClasses,
+    });
+    if (conflicts.length > 0) return sendConflictResponse(res, conflicts);
 
     const data = await prisma.guruMapel.create({
       data: {
         guru_id: teacherId,
         mata_pelajaran_id: subjectId,
-        kelas_diampu: classes || '',
+        kelas_diampu: normalizedClasses,
         jam_per_minggu: parseInt(hoursPerWeek) || 0,
       },
       include: {
         guru: { select: { nama_lengkap: true } },
         mata_pelajaran: { select: { nama: true } },
       },
+    });
+    const syncedSchedules = await syncSchedulesForMapping({
+      teacherId,
+      subjectId,
+      classes: normalizedClasses,
     });
 
     return res.status(201).json({
@@ -98,6 +191,7 @@ const create = async (req, res) => {
         subject: data.mata_pelajaran.nama,
         classes: data.kelas_diampu,
         hoursPerWeek: data.jam_per_minggu,
+        syncedSchedules: syncedSchedules.count,
       },
     });
   } catch (error) {
@@ -109,18 +203,44 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const { teacherId, subjectId, classes, hoursPerWeek } = req.body;
+    const existing = await prisma.guruMapel.findUnique({ where: { id: req.params.id } });
+    if (!existing) {
+      return res.status(404).json({ message: 'Pemetaan guru-mapel tidak ditemukan' });
+    }
+
+    const nextSubjectId = subjectId || existing.mata_pelajaran_id;
+    const nextTeacherId = teacherId || existing.guru_id;
+    const nextClasses = classes !== undefined
+      ? normalizeClasses(classes)
+      : normalizeClasses(existing.kelas_diampu);
+    if (!nextClasses) {
+      return res.status(400).json({ message: 'Minimal satu kelas yang diampu wajib dipilih' });
+    }
+
+    const conflicts = await findClassSubjectConflicts({
+      subjectId: nextSubjectId,
+      classes: nextClasses,
+      excludeId: req.params.id,
+    });
+    if (conflicts.length > 0) return sendConflictResponse(res, conflicts);
+
     const data = await prisma.guruMapel.update({
       where: { id: req.params.id },
       data: {
-        ...(teacherId && { guru_id: teacherId }),
-        ...(subjectId && { mata_pelajaran_id: subjectId }),
-        ...(classes !== undefined && { kelas_diampu: classes }),
+        guru_id: nextTeacherId,
+        mata_pelajaran_id: nextSubjectId,
+        kelas_diampu: nextClasses,
         ...(hoursPerWeek !== undefined && { jam_per_minggu: parseInt(hoursPerWeek) }),
       },
       include: {
         guru: { select: { nama_lengkap: true } },
         mata_pelajaran: { select: { nama: true } },
       },
+    });
+    const syncedSchedules = await syncSchedulesForMapping({
+      teacherId: nextTeacherId,
+      subjectId: nextSubjectId,
+      classes: nextClasses,
     });
     return res.status(200).json({
       message: 'Pemetaan guru-mapel berhasil diperbarui',
@@ -130,6 +250,7 @@ const update = async (req, res) => {
         subject: data.mata_pelajaran.nama,
         classes: data.kelas_diampu,
         hoursPerWeek: data.jam_per_minggu,
+        syncedSchedules: syncedSchedules.count,
       },
     });
   } catch (error) {
@@ -149,4 +270,3 @@ const remove = async (req, res) => {
 };
 
 module.exports = { getAll, create, update, remove };
-

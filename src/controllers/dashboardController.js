@@ -16,6 +16,34 @@ const JAKARTA_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 const pad2 = (value) => String(value).padStart(2, '0');
 
+const parseClasses = (classes = '') =>
+  `${classes}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const syncGuruMapelSchedules = async (assignments) => {
+  for (const assignment of assignments) {
+    const classNames = parseClasses(assignment.kelas_diampu);
+    if (classNames.length === 0) continue;
+
+    const masterKelas = await prisma.masterKelas.findMany({
+      where: { nama: { in: classNames } },
+      select: { id: true },
+    });
+    const masterKelasIds = masterKelas.map((item) => item.id);
+    if (masterKelasIds.length === 0) continue;
+
+    await prisma.jadwalPelajaran.updateMany({
+      where: {
+        mata_pelajaran_id: assignment.mata_pelajaran_id,
+        master_kelas_id: { in: masterKelasIds },
+      },
+      data: { guru_id: assignment.guru_id },
+    });
+  }
+};
+
 const getJakartaPeriod = (date = new Date()) => {
   const jakartaDate = new Date(date.getTime() + JAKARTA_OFFSET_MS);
   const month = jakartaDate.getUTCMonth() + 1;
@@ -30,6 +58,16 @@ const getJakartaPeriod = (date = new Date()) => {
   };
 };
 
+const formatSemester = (semester) =>
+  semester
+    ? {
+        id: semester.id,
+        nama: semester.nama,
+        tahunAjaran: semester.tahun_ajaran?.kode || '-',
+        label: `${semester.nama} - ${semester.tahun_ajaran?.kode || '-'}`,
+      }
+    : null;
+
 const sortSchedule = (a, b) => {
   const dayA = DAY_ORDER.indexOf(a.hari);
   const dayB = DAY_ORDER.indexOf(b.hari);
@@ -38,6 +76,75 @@ const sortSchedule = (a, b) => {
   if (normalizedDayA !== normalizedDayB) return normalizedDayA - normalizedDayB;
   return (a.slot_index || 0) - (b.slot_index || 0);
 };
+
+const findWaliKelasRombel = async (waliId) => {
+  const activeTahunAjaran = await prisma.tahunAjaran.findFirst({
+    where: { is_active: true },
+    select: { id: true },
+  });
+
+  const mappedMasterKelas = await prisma.masterKelas.findMany({
+    where: { wali_kelas_id: waliId },
+    select: { id: true },
+  });
+  const mappedMasterKelasIds = mappedMasterKelas.map((kelas) => kelas.id);
+
+  return prisma.rombel.findFirst({
+    where: {
+      ...(activeTahunAjaran ? { tahun_ajaran_id: activeTahunAjaran.id } : {}),
+      OR: [
+        { wali_kelas_id: waliId },
+        ...(mappedMasterKelasIds.length
+          ? [{ master_kelas_id: { in: mappedMasterKelasIds } }]
+          : []),
+      ],
+    },
+    include: {
+      master_kelas: true,
+      tahun_ajaran: true,
+      siswa: {
+        include: {
+          siswa: { select: { id: true, nama_lengkap: true, nomor_induk: true } },
+        },
+      },
+    },
+  });
+};
+
+const syncWaliKelasRombel = async (rombel, waliId) => {
+  if (rombel && rombel.wali_kelas_id !== waliId) {
+    await prisma.rombel.update({
+      where: { id: rombel.id },
+      data: { wali_kelas_id: waliId },
+    });
+  }
+};
+
+const emptyAttendanceStats = () => ({
+  hadir: 0,
+  sakit: 0,
+  izin: 0,
+  alpa: 0,
+  total: 0,
+  attendance: [],
+});
+
+const addAttendanceRecord = (stats, record) => {
+  const key = `${record.status || ''}`.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(stats, key)) {
+    stats[key] += 1;
+  }
+  stats.total += 1;
+  stats.attendance.push({
+    jadwalId: record.jadwal_id,
+    tanggal: record.tanggal,
+    status: record.status,
+    pertemuanKe: record.pertemuan_ke,
+  });
+};
+
+const attendanceRate = (stats) =>
+  stats.total > 0 ? Math.round((stats.hadir / stats.total) * 100) : 0;
 
 /**
  * GET /api/dashboard/stats
@@ -296,39 +403,7 @@ const getKurikulumDashboard = async (req, res) => {
 const getWaliKelasDashboard = async (req, res) => {
   try {
     const waliId = req.user.userId;
-
-    const activeTahunAjaran = await prisma.tahunAjaran.findFirst({
-      where: { is_active: true },
-      select: { id: true },
-    });
-
-    const mappedMasterKelas = await prisma.masterKelas.findMany({
-      where: { wali_kelas_id: waliId },
-      select: { id: true },
-    });
-    const mappedMasterKelasIds = mappedMasterKelas.map((kelas) => kelas.id);
-
-    // Find rombel where this user is wali kelas directly or through Master Kelas mapping.
-    const rombel = await prisma.rombel.findFirst({
-      where: {
-        ...(activeTahunAjaran ? { tahun_ajaran_id: activeTahunAjaran.id } : {}),
-        OR: [
-          { wali_kelas_id: waliId },
-          ...(mappedMasterKelasIds.length
-            ? [{ master_kelas_id: { in: mappedMasterKelasIds } }]
-            : []),
-        ],
-      },
-      include: {
-        master_kelas: true,
-        tahun_ajaran: true,
-        siswa: {
-          include: {
-            siswa: { select: { id: true, nama_lengkap: true, nomor_induk: true } },
-          },
-        },
-      },
-    });
+    const rombel = await findWaliKelasRombel(waliId);
 
     if (!rombel) {
       return res.status(200).json({
@@ -337,19 +412,24 @@ const getWaliKelasDashboard = async (req, res) => {
       });
     }
 
-    if (rombel.wali_kelas_id !== waliId) {
-      await prisma.rombel.update({
-        where: { id: rombel.id },
-        data: { wali_kelas_id: waliId },
-      });
-    }
+    await syncWaliKelasRombel(rombel, waliId);
 
     const siswaIds = rombel.siswa.map((s) => s.siswa_id);
 
-    // Get attendance stats per student
-    const kehadiranAll = await prisma.kehadiran.findMany({
-      where: { siswa_id: { in: siswaIds } },
+    const activeSemester = await prisma.semester.findFirst({
+      where: { is_active: true },
+      include: { tahun_ajaran: true },
     });
+
+    // Get attendance stats per student for the active semester only.
+    const kehadiranAll = activeSemester
+      ? await prisma.kehadiran.findMany({
+          where: {
+            siswa_id: { in: siswaIds },
+            semester_id: activeSemester.id,
+          },
+        })
+      : [];
 
     // Group kehadiran by siswa
     const kehadiranMap = {};
@@ -361,11 +441,6 @@ const getWaliKelasDashboard = async (req, res) => {
         kehadiranMap[k.siswa_id][k.status.toLowerCase()]++;
         kehadiranMap[k.siswa_id].total++;
       }
-    });
-
-    // Get active semester
-    const activeSemester = await prisma.semester.findFirst({
-      where: { is_active: true },
     });
 
     // Get grade averages per student
@@ -430,6 +505,7 @@ const getWaliKelasDashboard = async (req, res) => {
         masterKelasId: rombel.master_kelas_id,
         kelas: rombel.master_kelas.nama,
         tahunAjaran: rombel.tahun_ajaran.kode,
+        semesterAktif: formatSemester(activeSemester),
         totalSiswa: siswaIds.length,
         attendanceStats: totalStats,
         flaggedStudents: studentSummaries.filter((s) => s.isFlagged),
@@ -438,6 +514,203 @@ const getWaliKelasDashboard = async (req, res) => {
     });
   } catch (error) {
     console.error('WaliKelas Dashboard Error:', error);
+    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+  }
+};
+
+/**
+ * GET /api/dashboard/wali-kelas/kehadiran-mapel
+ * Homeroom attendance monitoring aggregated by subject, not by individual schedule.
+ */
+const getWaliKelasKehadiranMapel = async (req, res) => {
+  try {
+    const waliId = req.user.userId;
+    const requestedSemesterId = req.query.semesterId?.toString() || null;
+    const rombel = await findWaliKelasRombel(waliId);
+
+    if (!rombel) {
+      return res.status(200).json({
+        message: 'Anda belum ditugaskan sebagai wali kelas',
+        data: { hasClass: false },
+      });
+    }
+
+    await syncWaliKelasRombel(rombel, waliId);
+
+    const students = rombel.siswa.map((rs) => ({
+      siswaId: rs.siswa.id,
+      id: rs.siswa.id,
+      name: rs.siswa.nama_lengkap,
+      nisn: rs.siswa.nomor_induk || '-',
+    }));
+    const siswaIds = students.map((s) => s.siswaId);
+
+    const semester = await prisma.semester.findFirst({
+      where: requestedSemesterId ? { id: requestedSemesterId } : { is_active: true },
+      include: { tahun_ajaran: true },
+    });
+    const effectiveSemesterId = requestedSemesterId || semester?.id || null;
+
+    const schedulesRaw = await prisma.jadwalPelajaran.findMany({
+      where: { master_kelas_id: rombel.master_kelas_id },
+      include: {
+        mata_pelajaran: { select: { id: true, nama: true } },
+        guru: { select: { nama_lengkap: true } },
+        ruang_kelas: { select: { kode: true } },
+      },
+    });
+    const schedules = schedulesRaw.sort(sortSchedule);
+    const scheduleIds = schedules.map((j) => j.id);
+
+    const attendanceRecords = effectiveSemesterId && scheduleIds.length > 0 && siswaIds.length > 0
+      ? await prisma.kehadiran.findMany({
+          where: {
+            jadwal_id: { in: scheduleIds },
+            siswa_id: { in: siswaIds },
+            semester_id: effectiveSemesterId,
+          },
+          select: {
+            siswa_id: true,
+            jadwal_id: true,
+            tanggal: true,
+            status: true,
+            pertemuan_ke: true,
+          },
+          orderBy: [{ tanggal: 'asc' }, { pertemuan_ke: 'asc' }],
+        })
+      : [];
+
+    const subjectMap = new Map();
+    const scheduleSubjectMap = new Map();
+    for (const schedule of schedules) {
+      const subjectId = schedule.mata_pelajaran_id;
+      scheduleSubjectMap.set(schedule.id, subjectId);
+
+      if (!subjectMap.has(subjectId)) {
+        subjectMap.set(subjectId, {
+          subjectId,
+          subject: schedule.mata_pelajaran?.nama || '-',
+          scheduleIds: [],
+          schedules: [],
+          statsByStudent: new Map(),
+        });
+      }
+
+      const subject = subjectMap.get(subjectId);
+      subject.scheduleIds.push(schedule.id);
+      subject.schedules.push({
+        id: schedule.id,
+        day: schedule.hari,
+        startTime: schedule.jam_mulai,
+        endTime: schedule.jam_selesai,
+        slotIndex: schedule.slot_index,
+        teacher: schedule.guru?.nama_lengkap || '-',
+        room: schedule.ruang_kelas?.kode || '-',
+      });
+    }
+
+    const overallStatsByStudent = new Map(
+      students.map((student) => [student.siswaId, emptyAttendanceStats()])
+    );
+
+    for (const record of attendanceRecords) {
+      const subjectId = scheduleSubjectMap.get(record.jadwal_id);
+      const subject = subjectMap.get(subjectId);
+      if (!subject) continue;
+
+      if (!subject.statsByStudent.has(record.siswa_id)) {
+        subject.statsByStudent.set(record.siswa_id, emptyAttendanceStats());
+      }
+      addAttendanceRecord(subject.statsByStudent.get(record.siswa_id), record);
+
+      if (!overallStatsByStudent.has(record.siswa_id)) {
+        overallStatsByStudent.set(record.siswa_id, emptyAttendanceStats());
+      }
+      addAttendanceRecord(overallStatsByStudent.get(record.siswa_id), record);
+    }
+
+    const subjects = Array.from(subjectMap.values()).map((subject) => {
+      const subjectStudents = students.map((student) => {
+        const stats = subject.statsByStudent.get(student.siswaId) || emptyAttendanceStats();
+        return {
+          ...student,
+          totalHadir: stats.hadir,
+          totalSakit: stats.sakit,
+          totalIzin: stats.izin,
+          totalAlpa: stats.alpa,
+          totalPertemuan: stats.total,
+          rate: attendanceRate(stats),
+          attendance: stats.attendance,
+        };
+      });
+
+      const totals = subjectStudents.reduce(
+        (acc, student) => ({
+          hadir: acc.hadir + student.totalHadir,
+          sakit: acc.sakit + student.totalSakit,
+          izin: acc.izin + student.totalIzin,
+          alpa: acc.alpa + student.totalAlpa,
+          total: acc.total + student.totalPertemuan,
+        }),
+        { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0 }
+      );
+
+      return {
+        subjectId: subject.subjectId,
+        subject: subject.subject,
+        scheduleIds: subject.scheduleIds,
+        schedules: subject.schedules,
+        totalHadir: totals.hadir,
+        totalSakit: totals.sakit,
+        totalIzin: totals.izin,
+        totalAlpa: totals.alpa,
+        totalPertemuan: totals.total,
+        rate: totals.total > 0 ? Math.round((totals.hadir / totals.total) * 100) : 0,
+        students: subjectStudents,
+      };
+    });
+
+    const studentSummaries = students.map((student) => {
+      const overall = overallStatsByStudent.get(student.siswaId) || emptyAttendanceStats();
+      return {
+        ...student,
+        totalHadir: overall.hadir,
+        totalSakit: overall.sakit,
+        totalIzin: overall.izin,
+        totalAlpa: overall.alpa,
+        totalPertemuan: overall.total,
+        rate: attendanceRate(overall),
+        subjects: subjects.map((subject) => {
+          const stats = subject.students.find((s) => s.siswaId === student.siswaId);
+          return {
+            subjectId: subject.subjectId,
+            subject: subject.subject,
+            totalHadir: stats?.totalHadir || 0,
+            totalSakit: stats?.totalSakit || 0,
+            totalIzin: stats?.totalIzin || 0,
+            totalAlpa: stats?.totalAlpa || 0,
+            totalPertemuan: stats?.totalPertemuan || 0,
+            rate: stats?.rate || 0,
+          };
+        }),
+      };
+    });
+
+    return res.status(200).json({
+      message: 'Monitoring kehadiran per mata pelajaran berhasil diambil',
+      data: {
+        hasClass: true,
+        rombelId: rombel.id,
+        masterKelasId: rombel.master_kelas_id,
+        kelas: rombel.master_kelas.nama,
+        tahunAjaran: rombel.tahun_ajaran.kode,
+        semesterAktif: formatSemester(semester),
+        subjects,
+        students: studentSummaries,
+      },
+    });
+  } catch (error) {
+    console.error('WaliKelas Kehadiran Mapel Error:', error);
     return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
   }
 };
@@ -567,6 +840,7 @@ const getGuruDashboard = async (req, res) => {
       where: { guru_id: guruId },
       include: { mata_pelajaran: { select: { nama: true } } },
     });
+    await syncGuruMapelSchedules(assignments);
 
     // Get today's schedule
     const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
@@ -757,6 +1031,22 @@ const getGuruClassDetail = async (req, res) => {
       select: { nama: true }
     });
 
+    const currentMapping = await prisma.guruMapel.findFirst({
+      where: {
+        guru_id: guruId,
+        mata_pelajaran_id: mataPelajaranId,
+      },
+    });
+    if (currentMapping && parseClasses(currentMapping.kelas_diampu).includes(rombel.master_kelas.nama)) {
+      await prisma.jadwalPelajaran.updateMany({
+        where: {
+          master_kelas_id: masterKelasId,
+          mata_pelajaran_id: mataPelajaranId,
+        },
+        data: { guru_id: guruId },
+      });
+    }
+
     // Fetch past journals and attendance for this specific class+subject+guru
     const schedules = await prisma.jadwalPelajaran.findMany({
       where: {
@@ -779,21 +1069,21 @@ const getGuruClassDetail = async (req, res) => {
     });
 
     // Fetch kehadiran by scheduleIds + tanggal from journals
-    const journalTanggalPairs = journals.map(j => ({ jadwal_id: j.jadwal_id, tanggal: j.tanggal }));
-    const allKehadiran = journalTanggalPairs.length > 0
+    const journalMeetingPairs = journals.map(j => ({ jadwal_id: j.jadwal_id, pertemuan_ke: j.pertemuan_ke }));
+    const allKehadiran = journalMeetingPairs.length > 0
       ? await prisma.kehadiran.findMany({
         where: {
-          OR: journalTanggalPairs.map(p => ({ jadwal_id: p.jadwal_id, tanggal: p.tanggal })),
+          OR: journalMeetingPairs.map(p => ({ jadwal_id: p.jadwal_id, pertemuan_ke: p.pertemuan_ke })),
           siswa_id: { in: siswaIds }
         },
-        select: { siswa_id: true, jadwal_id: true, tanggal: true, status: true }
+        select: { siswa_id: true, jadwal_id: true, tanggal: true, pertemuan_ke: true, status: true }
       })
       : [];
 
     // Map kehadiran back to journals for easy lookup
     const journalsWithKehadiran = journals.map(j => ({
       ...j,
-      kehadiran: allKehadiran.filter(k => k.jadwal_id === j.jadwal_id && k.tanggal === j.tanggal)
+      kehadiran: allKehadiran.filter(k => k.jadwal_id === j.jadwal_id && k.pertemuan_ke === j.pertemuan_ke)
     }));
 
     const totalPertemuanDibuat = journals.length;
@@ -834,7 +1124,10 @@ const getGuruClassDetail = async (req, res) => {
         totalSakit: sakit,
         totalIzin: izin,
         totalAlpa: alpa,
-        totalPertemuan: totalPertemuanDibuat
+        totalPertemuan: totalPertemuanDibuat,
+        currentStatus: journalsWithKehadiran.length > 0 
+          ? (journalsWithKehadiran[journalsWithKehadiran.length - 1].kehadiran.find(k => k.siswa_id === s.id)?.status || 'ALPA')
+          : 'ALPA'
       };
     });
 
@@ -847,7 +1140,16 @@ const getGuruClassDetail = async (req, res) => {
       session: j.pertemuan_ke,
       topic: j.judul_materi,
       present: j.kehadiran.filter(k => k.status === 'HADIR').length,
-      total: j.kehadiran.length
+      total: j.kehadiran.length,
+      students: students.map(s => {
+        const kh = j.kehadiran.find(k => k.siswa_id === s.id);
+        return {
+          id: s.id,
+          name: s.name,
+          nisn: s.nisn,
+          status: kh ? kh.status : 'ALPA',
+        };
+      })
     }));
 
     // ── Dynamic Recap Matrix (Backend-calculated) ─────────────
@@ -898,6 +1200,7 @@ const getGuruClassDetail = async (req, res) => {
         students,
         histories,
         recap,
+        activeSemesterId: activeSemester ? activeSemester.id : null
       }
     });
 
@@ -938,49 +1241,54 @@ const quickSession = async (req, res) => {
     }
 
     if (jadwal.guru_id !== guruId) {
-      return res.status(403).json({ message: 'Anda tidak memiliki akses ke jadwal ini' });
+      const mappedAssignment = await prisma.guruMapel.findFirst({
+        where: {
+          guru_id: guruId,
+          mata_pelajaran_id: jadwal.mata_pelajaran_id,
+        },
+      });
+      const mappedToThisTeacher =
+        mappedAssignment &&
+        parseClasses(mappedAssignment.kelas_diampu).includes(jadwal.master_kelas.nama);
+
+      if (!mappedToThisTeacher) {
+        return res.status(403).json({ message: 'Anda tidak memiliki akses ke jadwal ini' });
+      }
+
+      await prisma.jadwalPelajaran.update({
+        where: { id: jadwalId },
+        data: { guru_id: guruId },
+      });
+      jadwal.guru_id = guruId;
     }
 
     // Calculate today's date string
     const now = new Date();
     const tanggal = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-    // Check if jurnal already exists for this jadwal + tanggal
-    const existingJurnal = await prisma.jurnalMengajar.findUnique({
-      where: { jadwal_id_tanggal: { jadwal_id: jadwalId, tanggal } },
+    // Auto-calculate pertemuanKe = max existing meeting number for this jadwal + 1.
+    const lastJurnal = await prisma.jurnalMengajar.findFirst({
+      where: { jadwal_id: jadwalId, guru_id: guruId },
+      orderBy: { pertemuan_ke: 'desc' },
+      select: { pertemuan_ke: true },
     });
+    const pertemuanKe = (lastJurnal?.pertemuan_ke || 0) + 1;
 
-    let pertemuanKe;
-    let jurnalId;
+    const jurnal = await prisma.jurnalMengajar.create({
+      data: {
+        jadwal_id: jadwalId,
+        guru_id: guruId,
+        tanggal,
+        pertemuan_ke: pertemuanKe,
+        judul_materi: `Pertemuan ke-${pertemuanKe}`,
+        deskripsi_kegiatan: `Sesi dibuka dari Dashboard pada ${now.toLocaleTimeString('id-ID')}`,
+      },
+    });
+    const jurnalId = jurnal.id;
 
-    if (existingJurnal) {
-      // Jurnal already exists — reuse it (e.g. teacher re-opens session)
-      pertemuanKe = existingJurnal.pertemuan_ke;
-      jurnalId = existingJurnal.id;
-    } else {
-      // Auto-calculate pertemuanKe = total existing journals for this jadwal + 1
-      const totalJurnals = await prisma.jurnalMengajar.count({
-        where: { jadwal_id: jadwalId, guru_id: guruId },
-      });
-      pertemuanKe = totalJurnals + 1;
-
-      // Create jurnal
-      const jurnal = await prisma.jurnalMengajar.create({
-        data: {
-          jadwal_id: jadwalId,
-          guru_id: guruId,
-          tanggal,
-          pertemuan_ke: pertemuanKe,
-          judul_materi: `Pertemuan ke-${pertemuanKe}`,
-          deskripsi_kegiatan: `Sesi dibuka dari Dashboard pada ${now.toLocaleTimeString('id-ID')}`,
-        },
-      });
-      jurnalId = jurnal.id;
-    }
-
-    // Deactivate all previous tokens for this jadwal+tanggal
+    // Deactivate all previous tokens for this jadwal+meeting number
     await prisma.sesiAbsensi.updateMany({
-      where: { jadwal_id: jadwalId, tanggal, is_active: true },
+      where: { jadwal_id: jadwalId, pertemuan_ke: pertemuanKe, is_active: true },
       data: { is_active: false },
     });
 
@@ -1051,6 +1359,7 @@ module.exports = {
   getStats,
   getKurikulumDashboard,
   getWaliKelasDashboard,
+  getWaliKelasKehadiranMapel,
   getSiswaDashboard,
   getGuruDashboard,
   getGuruClassDetail,

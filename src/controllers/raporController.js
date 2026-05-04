@@ -6,13 +6,14 @@
 
 const prisma = require('../config/prisma');
 const PDFDocument = require('pdfkit');
+const { canBypassWaliOwnership, findOwnedRombel } = require('../middlewares/ownershipMiddleware');
 
 const SCHOOL = {
   province: 'PEMERINTAH PROVINSI JAWA BARAT',
   office: 'DINAS PENDIDIKAN',
   name: 'SMA NEGERI 1 CIKALONG',
-  address: 'Jl. Raya Cikalong No. 1, Cikalong, Kab. Cianjur, Jawa Barat',
-  phone: 'Telp. (0263) 000000',
+  address: 'Jalan Raya Cikalong KM 06, Desa Singkir, Kecamatan Cikalong, Kabupaten Tasikmalaya, Provinsi Jawa Barat, Kode Pos 46195',
+  phone: '',
 };
 
 const formatDateId = (date = new Date()) =>
@@ -32,6 +33,30 @@ const averageNilai = (items) => {
   return items.reduce((sum, item) => sum + (Number(item.nilai_akhir) || 0), 0) / items.length;
 };
 
+const getRequiredMapelIds = async (masterKelasId) => {
+  if (!masterKelasId) return [];
+
+  const schedules = await prisma.jadwalPelajaran.findMany({
+    where: { master_kelas_id: masterKelasId },
+    select: { mata_pelajaran_id: true },
+    distinct: ['mata_pelajaran_id'],
+  });
+
+  return schedules.map((schedule) => schedule.mata_pelajaran_id).filter(Boolean);
+};
+
+const getRequiredMapelCount = async (masterKelasId) => {
+  const requiredMapelIds = await getRequiredMapelIds(masterKelasId);
+  if (requiredMapelIds.length > 0) {
+    return { totalMapel: requiredMapelIds.length, requiredMapelIds };
+  }
+
+  return {
+    totalMapel: await prisma.mataPelajaran.count(),
+    requiredMapelIds: [],
+  };
+};
+
 const gradeLetter = (nilai) => {
   if (nilai >= 90) return 'A';
   if (nilai >= 85) return 'A-';
@@ -48,13 +73,34 @@ const drawSchoolHeader = (doc, title) => {
   doc.font('Helvetica-Bold').fontSize(10).text(SCHOOL.province, { align: 'center' });
   doc.fontSize(10).text(SCHOOL.office, { align: 'center' });
   doc.fontSize(14).text(SCHOOL.name, { align: 'center' });
-  doc.font('Helvetica').fontSize(8).text(`${SCHOOL.address} | ${SCHOOL.phone}`, { align: 'center' });
+  const contactLine = SCHOOL.phone ? `${SCHOOL.address} | ${SCHOOL.phone}` : SCHOOL.address;
+  doc.font('Helvetica').fontSize(8).text(contactLine, 65, doc.y, { width: 465, align: 'center' });
   doc.moveDown(0.4);
   doc.moveTo(45, doc.y).lineTo(550, doc.y).lineWidth(1.2).stroke();
   doc.moveTo(45, doc.y + 2).lineTo(550, doc.y + 2).lineWidth(0.4).stroke();
   doc.moveDown(1);
   doc.font('Helvetica-Bold').fontSize(12).text(title, { align: 'center' });
   doc.moveDown(1);
+};
+
+const resetCursor = (doc, y = doc.y) => {
+  doc.x = 45;
+  doc.y = y;
+};
+
+const drawFullWidthText = (doc, text, options = {}) => {
+  const { y = doc.y, align = 'left', ...rest } = options;
+  doc.text(text, 45, y, {
+    width: 505,
+    align,
+    ...rest,
+  });
+};
+
+const drawSectionTitle = (doc, title) => {
+  resetCursor(doc);
+  doc.font('Helvetica-Bold').fontSize(10);
+  drawFullWidthText(doc, title);
 };
 
 const drawInfoRows = (doc, rows, leftX = 50, rightX = 315) => {
@@ -131,6 +177,150 @@ const getStudentContext = async (siswaId, semester) => {
   return { siswa, rombelSiswa };
 };
 
+const ensureCanAccessRapor = async (req, siswaId, semester, rombelSiswa) => {
+  const role = req.user.role;
+  const userId = req.user.userId;
+
+  if (canBypassWaliOwnership(role)) return true;
+  if (role === 'Siswa') return siswaId === userId;
+  if (!['Wali Kelas', 'Guru Mapel'].includes(role)) return false;
+  if (!rombelSiswa?.rombel?.id) return false;
+
+  const ownedRombel = await findOwnedRombel({
+    userId,
+    role,
+    rombelId: rombelSiswa.rombel.id,
+    tahunAjaranId: semester?.tahun_ajaran_id,
+  });
+
+  return Boolean(ownedRombel);
+};
+
+const loadRaporData = async (siswaId, semesterId) => {
+  const semester = await prisma.semester.findUnique({
+    where: { id: semesterId },
+    include: { tahun_ajaran: true },
+  });
+  if (!semester) return { notFound: 'Semester tidak ditemukan' };
+
+  const { siswa, rombelSiswa } = await getStudentContext(siswaId, semester);
+  if (!siswa) return { notFound: 'Siswa tidak ditemukan' };
+
+  const [nilaiList, kehadiranAll, catatan] = await Promise.all([
+    prisma.nilai.findMany({
+      where: { siswa_id: siswaId, semester_id: semesterId },
+      include: { mata_pelajaran: true },
+      orderBy: { mata_pelajaran: { nama: 'asc' } },
+    }),
+    prisma.kehadiran.findMany({ where: { siswa_id: siswaId, semester_id: semesterId } }),
+    prisma.catatanAkademik.findUnique({
+      where: { siswa_id_semester_id: { siswa_id: siswaId, semester_id: semesterId } },
+      include: { wali_kelas: { select: { nama_lengkap: true, nomor_induk: true } } },
+    }),
+  ]);
+
+  return { siswa, semester, rombelSiswa, nilaiList, kehadiranAll, catatan };
+};
+
+const drawRaporContent = (doc, payload) => {
+  const { siswa, semester, rombelSiswa, nilaiList, kehadiranAll, catatan } = payload;
+
+  drawSchoolHeader(doc, 'LAPORAN HASIL BELAJAR PESERTA DIDIK');
+  drawInfoRows(doc, [
+    ['Nama Peserta Didik', siswa.nama_lengkap],
+    ['NIS/NISN', siswa.nomor_induk || '-'],
+    ['Kelas', rombelSiswa?.rombel?.master_kelas?.nama || '-'],
+    ['Semester', semester.nama],
+    ['Tahun Pelajaran', semester.tahun_ajaran?.kode || '-'],
+    ['Wali Kelas', rombelSiswa?.rombel?.wali_kelas?.nama_lengkap || '-'],
+  ]);
+
+  doc.moveDown(0.6);
+  drawSectionTitle(doc, 'A. RINCIAN NILAI MATA PELAJARAN');
+  doc.moveDown(0.3);
+
+  const columns = [
+    { label: 'No', x: 48, width: 22, align: 'center' },
+    { label: 'Mata Pelajaran', x: 75, width: 135 },
+    { label: 'Tugas', x: 215, width: 34, align: 'center' },
+    { label: 'UH', x: 252, width: 30, align: 'center' },
+    { label: 'UTS', x: 285, width: 32, align: 'center' },
+    { label: 'UAS', x: 320, width: 32, align: 'center' },
+    { label: 'Aktif', x: 355, width: 36, align: 'center' },
+    { label: 'Hadir', x: 394, width: 36, align: 'center' },
+    { label: 'Akhir', x: 435, width: 38, align: 'center' },
+    { label: 'Pred.', x: 478, width: 34, align: 'center' },
+    { label: 'Ket.', x: 515, width: 32, align: 'center' },
+  ];
+
+  let y = drawTableHeader(doc, columns, doc.y);
+  doc.font('Helvetica').fontSize(7.5);
+  nilaiList.forEach((nilai, index) => {
+    ensureSpace(doc, 32);
+    if (doc.y !== y && doc.y < y) y = doc.y;
+    y = doc.y;
+    const rowHeight = 24;
+    if (index % 2 === 0) doc.rect(45, y - 2, 505, rowHeight).fill('#F9FAFB').fillColor('#000000');
+    const lulus = nilai.nilai_akhir >= nilai.mata_pelajaran.kkm;
+    const values = [
+      index + 1,
+      nilai.mata_pelajaran.nama,
+      Math.round(nilai.nilai_tugas),
+      Math.round(nilai.nilai_uh),
+      Math.round(nilai.nilai_uts),
+      Math.round(nilai.nilai_uas),
+      Math.round(nilai.nilai_keaktifan),
+      Math.round(nilai.nilai_kehadiran),
+      Math.round(nilai.nilai_akhir),
+      gradeLetter(nilai.nilai_akhir),
+      lulus ? 'T' : 'BT',
+    ];
+    columns.forEach((col, colIndex) => {
+      doc.text(String(values[colIndex]), col.x, y + 4, { width: col.width, align: col.align || 'left' });
+    });
+    doc.y = y + rowHeight;
+  });
+
+  if (!nilaiList.length) {
+    resetCursor(doc, doc.y + 4);
+    doc.font('Helvetica').fontSize(9);
+    drawFullWidthText(doc, 'Belum ada data nilai.');
+    doc.moveDown();
+  }
+
+  const avg = averageNilai(nilaiList);
+  resetCursor(doc, doc.y + 8);
+  doc.font('Helvetica-Bold').fontSize(9);
+  drawFullWidthText(doc, `Rata-rata nilai semester: ${avg.toFixed(2)}`, { align: 'right' });
+
+  doc.moveDown(1);
+  ensureSpace(doc, 90);
+  const hadir = kehadiranAll.filter((k) => k.status === 'HADIR').length;
+  const sakit = kehadiranAll.filter((k) => k.status === 'SAKIT').length;
+  const izin = kehadiranAll.filter((k) => k.status === 'IZIN').length;
+  const alpa = kehadiranAll.filter((k) => k.status === 'ALPA').length;
+  drawSectionTitle(doc, 'B. KEHADIRAN');
+  doc.font('Helvetica').fontSize(9);
+  drawFullWidthText(doc, `Hadir: ${hadir}    Sakit: ${sakit}    Izin: ${izin}    Alpa: ${alpa}`);
+  doc.moveDown(0.8);
+
+  drawSectionTitle(doc, 'C. CATATAN WALI KELAS');
+  doc.moveDown(0.3);
+  doc.font('Helvetica').fontSize(9);
+  drawFullWidthText(doc, catatan?.catatan || 'Tidak ada catatan.', { align: 'justify' });
+  doc.moveDown(2);
+
+  drawSignatureSlots(doc, [
+    { role: 'Orang Tua/Wali', name: '( ____________________ )' },
+    {
+      placeDate: `Cikalong, ${formatDateId()}`,
+      role: 'Wali Kelas',
+      name: rombelSiswa?.rombel?.wali_kelas?.nama_lengkap || catatan?.wali_kelas?.nama_lengkap || '( ____________________ )',
+      nip: rombelSiswa?.rombel?.wali_kelas?.nomor_induk || catatan?.wali_kelas?.nomor_induk || null,
+    },
+  ]);
+};
+
 /**
  * GET /api/rapor/:siswaId/:semesterId
  * Generate e-Rapor PDF for a student in a specific semester.
@@ -139,123 +329,17 @@ const generateRapor = async (req, res) => {
   try {
     const { siswaId, semesterId } = req.params;
 
-    const semester = await prisma.semester.findUnique({
-      where: { id: semesterId },
-      include: { tahun_ajaran: true },
-    });
-    if (!semester) return res.status(404).json({ message: 'Semester tidak ditemukan' });
+    const payload = await loadRaporData(siswaId, semesterId);
+    if (payload.notFound) return res.status(404).json({ message: payload.notFound });
 
-    const { siswa, rombelSiswa } = await getStudentContext(siswaId, semester);
-    if (!siswa) return res.status(404).json({ message: 'Siswa tidak ditemukan' });
-
-    const [nilaiList, kehadiranAll, catatan] = await Promise.all([
-      prisma.nilai.findMany({
-        where: { siswa_id: siswaId, semester_id: semesterId },
-        include: { mata_pelajaran: true },
-        orderBy: { mata_pelajaran: { nama: 'asc' } },
-      }),
-      prisma.kehadiran.findMany({ where: { siswa_id: siswaId, semester_id: semesterId } }),
-      prisma.catatanAkademik.findUnique({
-        where: { siswa_id_semester_id: { siswa_id: siswaId, semester_id: semesterId } },
-        include: { wali_kelas: { select: { nama_lengkap: true, nomor_induk: true } } },
-      }),
-    ]);
+    const allowed = await ensureCanAccessRapor(req, siswaId, payload.semester, payload.rombelSiswa);
+    if (!allowed) return res.status(403).json({ message: 'Anda tidak memiliki akses ke rapor siswa ini' });
 
     const doc = new PDFDocument({ size: 'A4', margin: 45 });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=rapor_${safeFilename(siswa.nama_lengkap)}_${safeFilename(semester.nama)}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename=rapor_${safeFilename(payload.siswa.nama_lengkap)}_${safeFilename(payload.semester.nama)}.pdf`);
     doc.pipe(res);
-
-    drawSchoolHeader(doc, 'LAPORAN HASIL BELAJAR PESERTA DIDIK');
-    drawInfoRows(doc, [
-      ['Nama Peserta Didik', siswa.nama_lengkap],
-      ['NIS/NISN', siswa.nomor_induk || '-'],
-      ['Kelas', rombelSiswa?.rombel?.master_kelas?.nama || '-'],
-      ['Semester', semester.nama],
-      ['Tahun Pelajaran', semester.tahun_ajaran?.kode || '-'],
-      ['Wali Kelas', rombelSiswa?.rombel?.wali_kelas?.nama_lengkap || '-'],
-    ]);
-
-    doc.moveDown(0.6);
-    doc.font('Helvetica-Bold').fontSize(10).text('A. RINCIAN NILAI MATA PELAJARAN');
-    doc.moveDown(0.3);
-
-    const columns = [
-      { label: 'No', x: 48, width: 22, align: 'center' },
-      { label: 'Mata Pelajaran', x: 75, width: 135 },
-      { label: 'Tugas', x: 215, width: 34, align: 'center' },
-      { label: 'UH', x: 252, width: 30, align: 'center' },
-      { label: 'UTS', x: 285, width: 32, align: 'center' },
-      { label: 'UAS', x: 320, width: 32, align: 'center' },
-      { label: 'Aktif', x: 355, width: 36, align: 'center' },
-      { label: 'Hadir', x: 394, width: 36, align: 'center' },
-      { label: 'Akhir', x: 435, width: 38, align: 'center' },
-      { label: 'Pred.', x: 478, width: 34, align: 'center' },
-      { label: 'Ket.', x: 515, width: 32, align: 'center' },
-    ];
-
-    let y = drawTableHeader(doc, columns, doc.y);
-    doc.font('Helvetica').fontSize(7.5);
-    nilaiList.forEach((nilai, index) => {
-      ensureSpace(doc, 32);
-      if (doc.y !== y && doc.y < y) y = doc.y;
-      y = doc.y;
-      const rowHeight = 24;
-      if (index % 2 === 0) doc.rect(45, y - 2, 505, rowHeight).fill('#F9FAFB').fillColor('#000000');
-      const lulus = nilai.nilai_akhir >= nilai.mata_pelajaran.kkm;
-      const values = [
-        index + 1,
-        nilai.mata_pelajaran.nama,
-        Math.round(nilai.nilai_tugas),
-        Math.round(nilai.nilai_uh),
-        Math.round(nilai.nilai_uts),
-        Math.round(nilai.nilai_uas),
-        Math.round(nilai.nilai_keaktifan),
-        Math.round(nilai.nilai_kehadiran),
-        Math.round(nilai.nilai_akhir),
-        gradeLetter(nilai.nilai_akhir),
-        lulus ? 'T' : 'BT',
-      ];
-      columns.forEach((col, colIndex) => {
-        doc.text(String(values[colIndex]), col.x, y + 4, { width: col.width, align: col.align || 'left' });
-      });
-      doc.y = y + rowHeight;
-    });
-
-    if (!nilaiList.length) {
-      doc.font('Helvetica').fontSize(9).text('Belum ada data nilai.', 45, doc.y + 4);
-      doc.moveDown();
-    }
-
-    const avg = averageNilai(nilaiList);
-    doc.moveDown(0.5);
-    doc.font('Helvetica-Bold').fontSize(9).text(`Rata-rata nilai semester: ${avg.toFixed(2)}`, { align: 'right' });
-
-    doc.moveDown(1);
-    ensureSpace(doc, 90);
-    const hadir = kehadiranAll.filter((k) => k.status === 'HADIR').length;
-    const sakit = kehadiranAll.filter((k) => k.status === 'SAKIT').length;
-    const izin = kehadiranAll.filter((k) => k.status === 'IZIN').length;
-    const alpa = kehadiranAll.filter((k) => k.status === 'ALPA').length;
-    doc.font('Helvetica-Bold').fontSize(10).text('B. KEHADIRAN');
-    doc.font('Helvetica').fontSize(9).text(`Hadir: ${hadir}    Sakit: ${sakit}    Izin: ${izin}    Alpa: ${alpa}`);
-    doc.moveDown(0.8);
-
-    doc.font('Helvetica-Bold').fontSize(10).text('C. CATATAN WALI KELAS');
-    doc.moveDown(0.3);
-    doc.font('Helvetica').fontSize(9).text(catatan?.catatan || 'Tidak ada catatan.', { width: 505, align: 'justify' });
-    doc.moveDown(2);
-
-    drawSignatureSlots(doc, [
-      { role: 'Orang Tua/Wali', name: '( ____________________ )' },
-      {
-        placeDate: `Cikalong, ${formatDateId()}`,
-        role: 'Wali Kelas',
-        name: rombelSiswa?.rombel?.wali_kelas?.nama_lengkap || catatan?.wali_kelas?.nama_lengkap || '( ____________________ )',
-        nip: rombelSiswa?.rombel?.wali_kelas?.nomor_induk || catatan?.wali_kelas?.nomor_induk || null,
-      },
-    ]);
-
+    drawRaporContent(doc, payload);
     doc.end();
   } catch (error) {
     console.error('Generate Rapor Error:', error);
@@ -290,6 +374,8 @@ const generateTranskrip = async (req, res) => {
 
     const latestSemester = [...nilaiList].sort((a, b) => semesterOrderValue(b.semester) - semesterOrderValue(a.semester))[0]?.semester || null;
     const { rombelSiswa } = await getStudentContext(siswaId, latestSemester);
+    const allowed = await ensureCanAccessRapor(req, siswaId, latestSemester, rombelSiswa);
+    if (!allowed) return res.status(403).json({ message: 'Anda tidak memiliki akses ke transkrip siswa ini' });
 
     const doc = new PDFDocument({ size: 'A4', margin: 45 });
     res.setHeader('Content-Type', 'application/pdf');
@@ -337,12 +423,15 @@ const generateTranskrip = async (req, res) => {
     });
 
     if (!nilaiList.length) {
-      doc.font('Helvetica').fontSize(9).text('Belum ada data nilai.', 45, doc.y + 4);
+      resetCursor(doc, doc.y + 4);
+      doc.font('Helvetica').fontSize(9);
+      drawFullWidthText(doc, 'Belum ada data nilai.');
       doc.moveDown();
     }
 
-    doc.moveDown(0.8);
-    doc.font('Helvetica-Bold').fontSize(10).text(`Rata-rata kumulatif: ${averageNilai(nilaiList).toFixed(2)}`, { align: 'right' });
+    resetCursor(doc, doc.y + 10);
+    doc.font('Helvetica-Bold').fontSize(10);
+    drawFullWidthText(doc, `Rata-rata kumulatif: ${averageNilai(nilaiList).toFixed(2)}`, { align: 'right' });
     doc.moveDown(2);
 
     drawSignatureSlots(doc, [
@@ -368,35 +457,36 @@ const previewRapor = async (req, res) => {
   try {
     const { siswaId, semesterId } = req.params;
 
-    const [siswa, semester, nilaiList, kehadiranAll, catatan] = await Promise.all([
-      prisma.user.findUnique({
-        where: { id: siswaId },
-        include: { profile: true },
-      }),
-      prisma.semester.findUnique({
-        where: { id: semesterId },
-        include: { tahun_ajaran: true },
-      }),
-      prisma.nilai.findMany({
-        where: { siswa_id: siswaId, semester_id: semesterId },
-        include: { mata_pelajaran: true },
-        orderBy: { mata_pelajaran: { nama: 'asc' } },
-      }),
-      prisma.kehadiran.findMany({ where: { siswa_id: siswaId, semester_id: semesterId } }),
-      prisma.catatanAkademik.findUnique({
-        where: { siswa_id_semester_id: { siswa_id: siswaId, semester_id: semesterId } },
-      }),
-    ]);
+    const payload = await loadRaporData(siswaId, semesterId);
+    if (payload.notFound) return res.status(404).json({ message: payload.notFound });
 
-    if (!siswa || !semester) {
-      return res.status(404).json({ message: 'Data tidak ditemukan' });
-    }
+    const allowed = await ensureCanAccessRapor(req, siswaId, payload.semester, payload.rombelSiswa);
+    if (!allowed) return res.status(403).json({ message: 'Anda tidak memiliki akses ke rapor siswa ini' });
 
-    const { rombelSiswa } = await getStudentContext(siswaId, semester);
+    const { siswa, semester, rombelSiswa, nilaiList, kehadiranAll, catatan } = payload;
+    const { totalMapel, requiredMapelIds } = await getRequiredMapelCount(rombelSiswa?.rombel?.master_kelas_id);
+    const completedMapelCount = requiredMapelIds.length > 0
+      ? new Set(
+          nilaiList
+            .filter((nilai) => requiredMapelIds.includes(nilai.mata_pelajaran_id))
+            .map((nilai) => nilai.mata_pelajaran_id)
+        ).size
+      : nilaiList.length;
+    const hasNotes = Boolean(catatan?.catatan?.trim());
+    const nilaiComplete = totalMapel > 0 ? completedMapelCount >= totalMapel : completedMapelCount > 0;
+    const missingData = [];
+    if (!nilaiComplete) missingData.push('nilai');
+    if (kehadiranAll.length === 0) missingData.push('kehadiran');
+    if (!hasNotes) missingData.push('catatan');
 
     return res.status(200).json({
       message: 'Preview rapor berhasil',
       data: {
+        canPrint: missingData.length === 0,
+        missingData,
+        nilaiCount: completedMapelCount,
+        totalMapel,
+        kehadiranCount: kehadiranAll.length,
         siswa: {
           nama: siswa.nama_lengkap,
           nisn: siswa.nomor_induk || '-',
@@ -433,4 +523,160 @@ const previewRapor = async (req, res) => {
   }
 };
 
-module.exports = { generateRapor, generateTranskrip, previewRapor };
+const getRaporStatusByRombel = async (req, res) => {
+  try {
+    const { rombelId } = req.params;
+    let { semesterId } = req.query;
+
+    let semester = null;
+    if (semesterId) {
+      semester = await prisma.semester.findUnique({
+        where: { id: semesterId },
+        include: { tahun_ajaran: true },
+      });
+    } else {
+      semester = await prisma.semester.findFirst({
+        where: { is_active: true },
+        include: { tahun_ajaran: true },
+      });
+      semesterId = semester?.id;
+    }
+
+    if (!semester || !semesterId) {
+      return res.status(404).json({ message: 'Semester tidak ditemukan' });
+    }
+
+    const rombel = await findOwnedRombel({
+      userId: req.user.userId,
+      role: req.user.role,
+      rombelId,
+      tahunAjaranId: semester.tahun_ajaran_id,
+    });
+
+    if (!rombel) {
+      const status = canBypassWaliOwnership(req.user.role) ? 404 : 403;
+      return res.status(status).json({ message: 'Rombel tidak ditemukan atau bukan kelas wali Anda' });
+    }
+
+    const siswaIds = rombel.siswa.map((s) => s.siswa_id);
+    const { totalMapel, requiredMapelIds } = await getRequiredMapelCount(rombel.master_kelas_id);
+    const mapelWhere = requiredMapelIds.length > 0
+      ? { mata_pelajaran_id: { in: requiredMapelIds } }
+      : {};
+    const [nilaiList, catatanList, kehadiranList] = await Promise.all([
+      prisma.nilai.findMany({
+        where: { siswa_id: { in: siswaIds }, semester_id: semesterId, ...mapelWhere },
+        select: { siswa_id: true },
+      }),
+      prisma.catatanAkademik.findMany({
+        where: { siswa_id: { in: siswaIds }, semester_id: semesterId },
+        select: { id: true, siswa_id: true, catatan: true },
+      }),
+      prisma.kehadiran.findMany({
+        where: { siswa_id: { in: siswaIds }, semester_id: semesterId },
+        select: { siswa_id: true },
+      }),
+    ]);
+
+    const nilaiCount = {};
+    nilaiList.forEach((n) => {
+      nilaiCount[n.siswa_id] = (nilaiCount[n.siswa_id] || 0) + 1;
+    });
+    const catatanMap = {};
+    catatanList.forEach((c) => {
+      catatanMap[c.siswa_id] = c;
+    });
+    const kehadiranCount = {};
+    kehadiranList.forEach((k) => {
+      kehadiranCount[k.siswa_id] = (kehadiranCount[k.siswa_id] || 0) + 1;
+    });
+
+    const data = rombel.siswa.map((rs, index) => {
+      const count = nilaiCount[rs.siswa_id] || 0;
+      const note = catatanMap[rs.siswa_id];
+      const attendanceCount = kehadiranCount[rs.siswa_id] || 0;
+      const hasNotes = Boolean(note?.catatan?.trim());
+      const nilaiComplete = totalMapel > 0 ? count >= totalMapel : count > 0;
+      const missingData = [];
+      if (!nilaiComplete) missingData.push('nilai');
+      if (attendanceCount === 0) missingData.push('kehadiran');
+      if (!hasNotes) missingData.push('catatan');
+
+      return {
+        id: rs.siswa.id,
+        no: index + 1,
+        nisn: rs.siswa.nomor_induk || '-',
+        name: rs.siswa.nama_lengkap,
+        comp: count,
+        total: totalMapel,
+        kehadiranCount: attendanceCount,
+        catatanId: note?.id || null,
+        hasNotes,
+        canPrint: missingData.length === 0,
+        missingData,
+      };
+    });
+
+    return res.status(200).json({
+      message: 'Status rapor rombel berhasil diambil',
+      data: {
+        rombelId: rombel.id,
+        kelas: rombel.master_kelas?.nama || '-',
+        semesterId,
+        semester: semester.nama,
+        tahunAjaran: semester.tahun_ajaran?.kode || '-',
+        students: data,
+      },
+    });
+  } catch (error) {
+    console.error('Rapor Status Error:', error);
+    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+  }
+};
+
+const generateBulkRapor = async (req, res) => {
+  try {
+    const { semesterId, siswaIds } = req.body;
+
+    if (!semesterId || !Array.isArray(siswaIds) || siswaIds.length === 0) {
+      return res.status(400).json({ message: 'semesterId dan siswaIds wajib diisi' });
+    }
+
+    const payloads = [];
+    for (const siswaId of siswaIds) {
+      const payload = await loadRaporData(siswaId, semesterId);
+      if (payload.notFound) return res.status(404).json({ message: payload.notFound });
+
+      const allowed = await ensureCanAccessRapor(req, siswaId, payload.semester, payload.rombelSiswa);
+      if (!allowed) {
+        return res.status(403).json({ message: 'Anda tidak memiliki akses ke salah satu rapor siswa yang dipilih' });
+      }
+
+      payloads.push(payload);
+    }
+
+    const semester = payloads[0].semester;
+    const doc = new PDFDocument({ size: 'A4', margin: 45 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=rapor_massal_${safeFilename(semester.nama)}_${safeFilename(semester.tahun_ajaran?.kode)}.pdf`);
+    doc.pipe(res);
+
+    payloads.forEach((payload, index) => {
+      if (index > 0) doc.addPage();
+      drawRaporContent(doc, payload);
+    });
+
+    doc.end();
+  } catch (error) {
+    console.error('Generate Bulk Rapor Error:', error);
+    if (!res.headersSent) return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+  }
+};
+
+module.exports = {
+  generateRapor,
+  generateTranskrip,
+  previewRapor,
+  getRaporStatusByRombel,
+  generateBulkRapor,
+};

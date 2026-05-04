@@ -8,6 +8,49 @@ const prisma = require('../config/prisma');
 
 const VALID_TYPES = ['HERO', 'BERITA', 'PRESTASI', 'VIDEO'];
 
+const serializeCmsItem = (data) => ({
+  id: data.id,
+  type: data.tipe,
+  title: data.judul,
+  content: data.konten,
+  imageUrl: data.gambar_url,
+  videoUrl: data.video_url,
+  order: data.urutan,
+  isActive: data.is_active,
+  createdAt: data.created_at,
+  updatedAt: data.updated_at,
+});
+
+const parseOrder = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const validateUpdatePayload = (body) => {
+  const errors = [];
+  const { type, title, order, isActive } = body;
+
+  if (type !== undefined) {
+    if (!type || !VALID_TYPES.includes(`${type}`.toUpperCase())) {
+      errors.push(`Tipe konten harus salah satu dari: ${VALID_TYPES.join(', ')}`);
+    }
+  }
+
+  if (title !== undefined && `${title}`.trim() === '') {
+    errors.push('Judul wajib diisi');
+  }
+
+  if (order !== undefined && parseOrder(order) === null) {
+    errors.push('Urutan tampil harus berupa angka');
+  }
+
+  if (isActive !== undefined && typeof isActive !== 'boolean') {
+    errors.push('Status publikasi harus bernilai boolean');
+  }
+
+  return errors;
+};
+
 /**
  * GET /api/cms?tipe=BERITA
  * Public — no auth required
@@ -27,22 +70,47 @@ const getPublic = async (req, res) => {
       orderBy: [{ urutan: 'asc' }, { created_at: 'desc' }],
     });
 
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     return res.status(200).json({
       message: 'Konten berhasil diambil',
-      data: data.map((d) => ({
-        id: d.id,
-        type: d.tipe,
-        title: d.judul,
-        content: d.konten,
-        imageUrl: d.gambar_url,
-        videoUrl: d.video_url,
-        order: d.urutan,
-        isActive: d.is_active,
-        createdAt: d.created_at,
-      })),
+      data: data.map(serializeCmsItem),
     });
   } catch (error) {
     console.error('CMS GetPublic Error:', error);
+    return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
+  }
+};
+
+/**
+ * GET /api/cms/:id
+ * Public — detail page for active public content
+ */
+const getPublicById = async (req, res) => {
+  try {
+    const data = await prisma.kontenPublik.findFirst({
+      where: {
+        id: req.params.id,
+        is_active: true,
+      },
+    });
+
+    if (!data) {
+      return res.status(404).json({ message: 'Konten tidak ditemukan' });
+    }
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    return res.status(200).json({
+      message: 'Detail konten berhasil diambil',
+      data: serializeCmsItem(data),
+    });
+  } catch (error) {
+    console.error('CMS GetPublicById Error:', error);
     return res.status(500).json({ message: 'Terjadi kesalahan internal pada server' });
   }
 };
@@ -67,18 +135,7 @@ const getAll = async (req, res) => {
 
     return res.status(200).json({
       message: 'Data konten berhasil diambil',
-      data: data.map((d) => ({
-        id: d.id,
-        type: d.tipe,
-        title: d.judul,
-        content: d.konten,
-        imageUrl: d.gambar_url,
-        videoUrl: d.video_url,
-        order: d.urutan,
-        isActive: d.is_active,
-        createdAt: d.created_at,
-        updatedAt: d.updated_at,
-      })),
+      data: data.map(serializeCmsItem),
     });
   } catch (error) {
     console.error('CMS GetAll Error:', error);
@@ -116,16 +173,7 @@ const create = async (req, res) => {
 
     return res.status(201).json({
       message: 'Konten berhasil ditambahkan',
-      data: {
-        id: data.id,
-        type: data.tipe,
-        title: data.judul,
-        content: data.konten,
-        imageUrl: data.gambar_url,
-        videoUrl: data.video_url,
-        order: data.urutan,
-        isActive: data.is_active,
-      },
+      data: serializeCmsItem(data),
     });
   } catch (error) {
     console.error('CMS Create Error:', error);
@@ -140,14 +188,26 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const { type, title, content, imageUrl, videoUrl, order, isActive } = req.body;
+    const errors = validateUpdatePayload(req.body);
+
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join('. ') });
+    }
+
+    const existing = await prisma.kontenPublik.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: 'Konten tidak ditemukan' });
+    }
 
     const updateData = {};
-    if (type && VALID_TYPES.includes(type.toUpperCase())) updateData.tipe = type.toUpperCase();
-    if (title) updateData.judul = title;
+    if (type !== undefined) updateData.tipe = `${type}`.toUpperCase();
+    if (title !== undefined) updateData.judul = `${title}`.trim();
     if (content !== undefined) updateData.konten = content || null;
     if (imageUrl !== undefined) updateData.gambar_url = imageUrl || null;
     if (videoUrl !== undefined) updateData.video_url = videoUrl || null;
-    if (order !== undefined) updateData.urutan = parseInt(order) || 0;
+    if (order !== undefined) updateData.urutan = parseOrder(order);
     if (isActive !== undefined) updateData.is_active = isActive;
 
     const data = await prisma.kontenPublik.update({
@@ -157,12 +217,7 @@ const update = async (req, res) => {
 
     return res.status(200).json({
       message: 'Konten berhasil diperbarui',
-      data: {
-        id: data.id,
-        type: data.tipe,
-        title: data.judul,
-        isActive: data.is_active,
-      },
+      data: serializeCmsItem(data),
     });
   } catch (error) {
     console.error('CMS Update Error:', error);
@@ -208,4 +263,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { getPublic, getAll, create, update, toggleActive, remove };
+module.exports = { getPublic, getPublicById, getAll, create, update, toggleActive, remove };

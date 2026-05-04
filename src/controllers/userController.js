@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════
 
 const prisma = require('../config/prisma');
-const bcrypt = require('bcrypt');
+const { hashPassword } = require('../utils/authSecurity');
 
 /**
  * GET /api/users
@@ -21,6 +21,7 @@ const getAll = async (req, res) => {
       where.OR = [
         { nama_lengkap: { contains: search, mode: 'insensitive' } },
         { email: { contains: search, mode: 'insensitive' } },
+        { username: { contains: search, mode: 'insensitive' } },
         { nomor_induk: { contains: search, mode: 'insensitive' } },
       ];
     }
@@ -43,9 +44,11 @@ const getAll = async (req, res) => {
       id: u.id,
       name: u.nama_lengkap,
       email: u.email,
+      username: u.username || '',
       idNumber: u.nomor_induk || '-',
       role: u.role.nama_role,
       status: u.status_aktif ? 'Aktif' : 'Tidak Aktif',
+      forcePasswordChange: Boolean(u.force_password_change),
     }));
 
     return res.status(200).json({
@@ -84,9 +87,11 @@ const getById = async (req, res) => {
         id: user.id,
         name: user.nama_lengkap,
         email: user.email,
+        username: user.username || '',
         idNumber: user.nomor_induk || '-',
         role: user.role.nama_role,
         status: user.status_aktif ? 'Aktif' : 'Tidak Aktif',
+        forcePasswordChange: Boolean(user.force_password_change),
         profile: user.profile,
       },
     });
@@ -109,16 +114,23 @@ const getById = async (req, res) => {
  */
 const create = async (req, res) => {
   try {
-    const { name, email, idNumber, role, password, status } = req.body;
+    const { name, email, username, idNumber, role, password, status } = req.body;
 
     if (!name || !email || !role || !password) {
       return res.status(400).json({ message: 'Nama, email, peran, dan password wajib diisi' });
     }
 
-    // Check duplicate email
-    const existing = await prisma.user.findUnique({ where: { email } });
+    const existing = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: { equals: email, mode: 'insensitive' } },
+          ...(username ? [{ username: { equals: username, mode: 'insensitive' } }] : []),
+          ...(idNumber ? [{ nomor_induk: idNumber }] : []),
+        ],
+      },
+    });
     if (existing) {
-      return res.status(400).json({ message: 'Email sudah terdaftar' });
+      return res.status(400).json({ message: 'Email, username, atau nomor induk sudah terdaftar' });
     }
 
     // Find role
@@ -127,7 +139,7 @@ const create = async (req, res) => {
       return res.status(400).json({ message: `Peran "${role}" tidak ditemukan` });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await hashPassword(password);
 
     // ── DB Transaction: User + UserProfile (atomic) ──
     // If either insert fails, both are rolled back automatically
@@ -136,11 +148,13 @@ const create = async (req, res) => {
       const newUser = await tx.user.create({
         data: {
           email,
+          username: username || null,
           password_hash: hashedPassword,
           nama_lengkap: name,
           nomor_induk: idNumber || null,
           role_id: roleRecord.id,
           status_aktif: status !== 'Tidak Aktif',
+          force_password_change: true,
         },
         include: { role: true },
       });
@@ -161,9 +175,11 @@ const create = async (req, res) => {
         id: user.id,
         name: user.nama_lengkap,
         email: user.email,
+        username: user.username || '',
         idNumber: user.nomor_induk || '-',
         role: user.role.nama_role,
         status: user.status_aktif ? 'Aktif' : 'Tidak Aktif',
+        forcePasswordChange: Boolean(user.force_password_change),
       },
     });
   } catch (error) {
@@ -177,11 +193,12 @@ const create = async (req, res) => {
  */
 const update = async (req, res) => {
   try {
-    const { name, email, idNumber, role, status } = req.body;
+    const { name, email, username, idNumber, role, status } = req.body;
 
     const updateData = {};
     if (name) updateData.nama_lengkap = name;
     if (email) updateData.email = email;
+    if (username !== undefined) updateData.username = username || null;
     if (idNumber !== undefined) updateData.nomor_induk = idNumber || null;
     if (status !== undefined) updateData.status_aktif = status !== 'Tidak Aktif';
 
@@ -214,6 +231,7 @@ const update = async (req, res) => {
         id: user.id,
         name: user.nama_lengkap,
         email: user.email,
+        username: user.username || '',
         idNumber: user.nomor_induk,
         role: user.role.nama_role,
         status: user.status_aktif ? 'Aktif' : 'Tidak Aktif',
@@ -249,11 +267,18 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({ message: 'Password baru wajib diisi' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await hashPassword(password);
 
     await prisma.user.update({
       where: { id: req.params.id },
-      data: { password_hash: hashedPassword },
+      data: {
+        password_hash: hashedPassword,
+        force_password_change: true,
+        password_changed_at: new Date(),
+        session_version: { increment: 1 },
+        failed_login_count: 0,
+        locked_until: null,
+      },
     });
 
     return res.status(200).json({ message: 'Kata sandi berhasil direset' });

@@ -5,6 +5,30 @@
 // ═══════════════════════════════════════════════
 
 const prisma = require('../config/prisma');
+const { canBypassWaliOwnership, findOwnedRombel } = require('../middlewares/ownershipMiddleware');
+
+const ensureCanManageStudentNote = async (req, siswaId, semesterId) => {
+  const requesterRole = req.user.role;
+  const requesterId = req.user.userId;
+
+  if (canBypassWaliOwnership(requesterRole)) return true;
+  if (requesterRole === 'Siswa') return siswaId === requesterId;
+
+  const semester = await prisma.semester.findUnique({
+    where: { id: semesterId },
+    select: { tahun_ajaran_id: true },
+  });
+  if (!semester) return false;
+
+  const rombel = await findOwnedRombel({
+    userId: requesterId,
+    role: requesterRole,
+    tahunAjaranId: semester.tahun_ajaran_id,
+    siswaId,
+  });
+
+  return Boolean(rombel);
+};
 
 /**
  * POST /api/catatan-akademik
@@ -17,6 +41,11 @@ const upsert = async (req, res) => {
 
     if (!siswaId || !semesterId || !catatan) {
       return res.status(400).json({ message: 'Siswa, semester, dan catatan wajib diisi' });
+    }
+
+    const allowed = await ensureCanManageStudentNote(req, siswaId, semesterId);
+    if (!allowed) {
+      return res.status(403).json({ message: 'Anda hanya dapat mengelola catatan siswa di kelas wali Anda' });
     }
 
     const data = await prisma.catatanAkademik.upsert({
@@ -71,6 +100,24 @@ const getBySiswa = async (req, res) => {
     const where = { siswa_id: req.params.siswaId };
     if (semesterId) where.semester_id = semesterId;
 
+    if (semesterId) {
+      const allowed = await ensureCanManageStudentNote(req, req.params.siswaId, semesterId);
+      if (!allowed) {
+        return res.status(403).json({ message: 'Anda tidak memiliki akses ke catatan siswa ini' });
+      }
+    } else if (req.user.role === 'Siswa' && req.params.siswaId !== req.user.userId) {
+      return res.status(403).json({ message: 'Anda tidak memiliki akses ke catatan siswa ini' });
+    } else if (!canBypassWaliOwnership(req.user.role) && req.user.role !== 'Siswa') {
+      const rombel = await findOwnedRombel({
+        userId: req.user.userId,
+        role: req.user.role,
+        siswaId: req.params.siswaId,
+      });
+      if (!rombel) {
+        return res.status(403).json({ message: 'Anda tidak memiliki akses ke catatan siswa ini' });
+      }
+    }
+
     const data = await prisma.catatanAkademik.findMany({
       where,
       include: {
@@ -111,14 +158,21 @@ const getByKelas = async (req, res) => {
       return res.status(400).json({ message: 'Parameter semesterId wajib diisi' });
     }
 
-    // Get students in this rombel
-    const rombel = await prisma.rombel.findFirst({
-      where: { master_kelas_id: req.params.kelasId },
-      include: { siswa: { select: { siswa_id: true } } },
+    const semester = await prisma.semester.findUnique({
+      where: { id: semesterId },
+      select: { tahun_ajaran_id: true },
+    });
+    if (!semester) return res.status(404).json({ message: 'Semester tidak ditemukan' });
+
+    const rombel = await findOwnedRombel({
+      userId: req.user.userId,
+      role: req.user.role,
+      masterKelasId: req.params.kelasId,
+      tahunAjaranId: semester.tahun_ajaran_id,
     });
 
     if (!rombel) {
-      return res.status(404).json({ message: 'Rombel tidak ditemukan' });
+      return res.status(403).json({ message: 'Anda tidak memiliki akses ke kelas ini' });
     }
 
     const siswaIds = rombel.siswa.map((s) => s.siswa_id);
@@ -156,6 +210,17 @@ const getByKelas = async (req, res) => {
  */
 const remove = async (req, res) => {
   try {
+    const existing = await prisma.catatanAkademik.findUnique({
+      where: { id: req.params.id },
+      select: { siswa_id: true, semester_id: true },
+    });
+    if (!existing) return res.status(404).json({ message: 'Catatan akademik tidak ditemukan' });
+
+    const allowed = await ensureCanManageStudentNote(req, existing.siswa_id, existing.semester_id);
+    if (!allowed) {
+      return res.status(403).json({ message: 'Anda hanya dapat menghapus catatan siswa di kelas wali Anda' });
+    }
+
     await prisma.catatanAkademik.delete({ where: { id: req.params.id } });
     return res.status(200).json({ message: 'Catatan akademik berhasil dihapus' });
   } catch (error) {

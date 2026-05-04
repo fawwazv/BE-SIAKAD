@@ -112,13 +112,19 @@ const getBySiswa = async (req, res) => {
     const data = await prisma.nilai.findMany({
       where,
       include: {
-        mata_pelajaran: { select: { nama: true, kkm: true } },
+        mata_pelajaran: { select: { kode: true, nama: true, kkm: true } },
         semester: { select: { id: true, nama: true, tahun_ajaran_id: true, tahun_ajaran: { select: { kode: true } } } },
       },
       orderBy: { mata_pelajaran: { nama: 'asc' } },
     });
 
-    const latestGrade = [...data].sort((a, b) => semesterOrderValue(b.semester) - semesterOrderValue(a.semester))[0];
+    const sortedData = [...data].sort((a, b) => {
+      const semesterDiff = semesterOrderValue(a.semester) - semesterOrderValue(b.semester);
+      if (semesterDiff !== 0) return semesterDiff;
+      return a.mata_pelajaran.nama.localeCompare(b.mata_pelajaran.nama, 'id');
+    });
+
+    const latestGrade = [...sortedData].sort((a, b) => semesterOrderValue(b.semester) - semesterOrderValue(a.semester))[0];
     let latestSummary = null;
 
     if (latestGrade) {
@@ -171,9 +177,10 @@ const getBySiswa = async (req, res) => {
     return res.status(200).json({
       message: 'Data nilai siswa berhasil diambil',
       summary: latestSummary,
-      data: data.map((d) => ({
+      data: sortedData.map((d) => ({
         id: d.id,
         mataPelajaranId: d.mata_pelajaran_id,
+        mataPelajaranKode: d.mata_pelajaran.kode,
         mataPelajaran: d.mata_pelajaran.nama,
         kkm: d.mata_pelajaran.kkm,
         semesterId: d.semester_id,

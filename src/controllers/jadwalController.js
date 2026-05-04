@@ -5,6 +5,41 @@
 
 const prisma = require('../config/prisma');
 
+const parseClasses = (classes = '') =>
+  `${classes}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const getMappedTeacher = (mappings, schedule) =>
+  mappings.find(
+    (mapping) =>
+      mapping.mata_pelajaran_id === schedule.mata_pelajaran_id &&
+      parseClasses(mapping.kelas_diampu).includes(schedule.master_kelas.nama)
+  );
+
+const getActiveSemester = () =>
+  prisma.semester.findFirst({
+    where: { is_active: true },
+    select: { id: true, tahun_ajaran_id: true },
+  });
+
+const getStudentClassId = async (studentId) => {
+  const activeSemester = await getActiveSemester();
+
+  const rombelSiswa = await prisma.rombelSiswa.findFirst({
+    where: {
+      siswa_id: studentId,
+      ...(activeSemester?.tahun_ajaran_id
+        ? { rombel: { tahun_ajaran_id: activeSemester.tahun_ajaran_id } }
+        : {}),
+    },
+    include: { rombel: { select: { master_kelas_id: true } } },
+  });
+
+  return rombelSiswa?.rombel?.master_kelas_id || null;
+};
+
 /**
  * GET /api/jadwal
  * Get schedule, optionally filtered by class and academic year
@@ -14,7 +49,20 @@ const getAll = async (req, res) => {
     const { kelasId, hari } = req.query;
 
     const where = {};
-    if (kelasId) where.master_kelas_id = kelasId;
+
+    if (req.user?.securityRole === 'SISWA') {
+      const studentClassId = await getStudentClassId(req.user.userId);
+      if (!studentClassId) {
+        return res.status(200).json({
+          message: 'Data jadwal berhasil diambil',
+          data: [],
+        });
+      }
+      where.master_kelas_id = studentClassId;
+    } else if (kelasId) {
+      where.master_kelas_id = kelasId;
+    }
+
     if (hari) where.hari = hari;
 
     const data = await prisma.jadwalPelajaran.findMany({
@@ -35,23 +83,30 @@ const getAll = async (req, res) => {
     const guruMap = {};
     gurus.forEach((g) => (guruMap[g.id] = g.nama_lengkap));
 
+    const mappings = await prisma.guruMapel.findMany({
+      include: { guru: { select: { id: true, nama_lengkap: true } } },
+    });
+
     return res.status(200).json({
       message: 'Data jadwal berhasil diambil',
-      data: data.map((d) => ({
-        id: d.id,
-        day: d.hari,
-        startTime: d.jam_mulai,
-        endTime: d.jam_selesai,
-        slotIndex: d.slot_index,
-        subject: d.mata_pelajaran.nama,
-        subjectId: d.mata_pelajaran_id,
-        teacher: guruMap[d.guru_id] || '-',
-        teacherId: d.guru_id,
-        classId: d.master_kelas_id,
-        className: d.master_kelas.nama,
-        room: d.ruang_kelas?.kode || '-',
-        roomId: d.ruang_kelas_id,
-      })),
+      data: data.map((d) => {
+        const mappedTeacher = getMappedTeacher(mappings, d);
+        return {
+          id: d.id,
+          day: d.hari,
+          startTime: d.jam_mulai,
+          endTime: d.jam_selesai,
+          slotIndex: d.slot_index,
+          subject: d.mata_pelajaran.nama,
+          subjectId: d.mata_pelajaran_id,
+          teacher: mappedTeacher?.guru?.nama_lengkap || guruMap[d.guru_id] || '-',
+          teacherId: mappedTeacher?.guru_id || d.guru_id,
+          classId: d.master_kelas_id,
+          className: d.master_kelas.nama,
+          room: d.ruang_kelas?.kode || '-',
+          roomId: d.ruang_kelas_id,
+        };
+      }),
     });
   } catch (error) {
     console.error('Jadwal GetAll Error:', error);

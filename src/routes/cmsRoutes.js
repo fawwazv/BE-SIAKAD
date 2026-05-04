@@ -16,6 +16,8 @@ router.get('/', cmsCtrl.getPublic);
 // ── Admin-only ──────────────────────────────────
 router.get('/all', verifyToken, authorizeRoles('Administrator'), cmsCtrl.getAll);
 
+router.get('/:id', validateUUID('id'), cmsCtrl.getPublicById);
+
 router.post('/', 
   verifyToken, 
   authorizeRoles('Administrator'), 

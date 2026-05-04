@@ -12,7 +12,7 @@ const { validateUUID, requireFields } = require('../middlewares/validationMiddle
 // Upsert catatan (Wali Kelas only)
 router.post('/', 
   verifyToken, 
-  authorizeRoles('Wali Kelas'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator'),
   requireFields('siswaId', 'semesterId', 'catatan'),
   catatanCtrl.upsert
 );
@@ -28,7 +28,7 @@ router.get('/siswa/:siswaId',
 // Get catatan for all students in a kelas
 router.get('/kelas/:kelasId', 
   verifyToken, 
-  authorizeRoles('Wali Kelas', 'Administrator'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator'),
   validateUUID('kelasId'),
   catatanCtrl.getByKelas
 );
@@ -36,7 +36,7 @@ router.get('/kelas/:kelasId',
 // Delete catatan
 router.delete('/:id', 
   verifyToken, 
-  authorizeRoles('Wali Kelas', 'Administrator'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator'),
   validateUUID('id'),
   catatanCtrl.remove
 );

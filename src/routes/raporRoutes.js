@@ -10,10 +10,23 @@ const { verifyToken, authorizeRoles } = require('../middlewares/authMiddleware')
 const { validateUUID } = require('../middlewares/validationMiddleware');
 const { verifySiswaAccess } = require('../middlewares/ownershipMiddleware');
 
+router.get('/status/rombel/:rombelId',
+  verifyToken,
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator', 'Kurikulum'),
+  validateUUID('rombelId'),
+  raporCtrl.getRaporStatusByRombel
+);
+
+router.post('/bulk',
+  verifyToken,
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator', 'Kurikulum'),
+  raporCtrl.generateBulkRapor
+);
+
 // Preview rapor data (JSON)
 router.get('/preview/:siswaId/:semesterId', 
   verifyToken, 
-  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum', 'Siswa'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator', 'Kurikulum', 'Siswa'),
   validateUUID('siswaId'),
   validateUUID('semesterId'),
   verifySiswaAccess('siswaId'),
@@ -23,7 +36,7 @@ router.get('/preview/:siswaId/:semesterId',
 // Generate PDF transkrip all semesters
 router.get('/transkrip/:siswaId',
   verifyToken,
-  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum', 'Siswa'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator', 'Kurikulum', 'Siswa'),
   validateUUID('siswaId'),
   verifySiswaAccess('siswaId'),
   raporCtrl.generateTranskrip
@@ -32,7 +45,7 @@ router.get('/transkrip/:siswaId',
 // Generate PDF rapor
 router.get('/:siswaId/:semesterId', 
   verifyToken, 
-  authorizeRoles('Wali Kelas', 'Administrator', 'Kurikulum', 'Siswa'),
+  authorizeRoles('Wali Kelas', 'Guru Mapel', 'Administrator', 'Kurikulum', 'Siswa'),
   validateUUID('siswaId'),
   validateUUID('semesterId'),
   verifySiswaAccess('siswaId'),

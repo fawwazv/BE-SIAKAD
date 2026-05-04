@@ -684,10 +684,10 @@ async function main() {
         try {
           await prisma.kehadiran.upsert({
             where: {
-              siswa_id_jadwal_id_tanggal: {
+              siswa_id_jadwal_id_pertemuan_ke: {
                 siswa_id: siswa.id,
                 jadwal_id: jadwal.id,
-                tanggal,
+                pertemuan_ke: week,
               },
             },
             update: { status },
@@ -739,7 +739,7 @@ async function main() {
 
       try {
         await prisma.jurnalMengajar.upsert({
-          where: { jadwal_id_tanggal: { jadwal_id: jadwal.id, tanggal } },
+          where: { jadwal_id_pertemuan_ke: { jadwal_id: jadwal.id, pertemuan_ke: week } },
           update: {},
           create: {
             jadwal_id: jadwal.id,

@@ -30,6 +30,12 @@ router.get('/wali-kelas',
   dashboardCtrl.getWaliKelasDashboard
 );
 
+router.get('/wali-kelas/kehadiran-mapel',
+  verifyToken,
+  authorizeRoles('Wali Kelas', 'Guru Mapel'),
+  dashboardCtrl.getWaliKelasKehadiranMapel
+);
+
 // Siswa dashboard
 router.get('/siswa', 
   verifyToken, 
