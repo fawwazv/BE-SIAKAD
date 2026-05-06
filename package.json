@@ -7,7 +7,10 @@
     "build": "npx prisma generate",
     "start": "node src/app.js",
     "dev": "npx nodemon src/app.js",
-    "test": "jest --verbose"
+    "test": "jest --verbose",
+    "seed:jurnal": "node prisma/seed_jurnal.js",
+    "seed:kehadiran-x1": "node prisma/seed_x_1_kehadiran.js",
+    "seed:data-xi1": "node prisma/seed_xi_1_data.js"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^6.4.1",
