@@ -28,7 +28,12 @@ router.post('/password-reset/confirm',
 // Protected - get current user
 router.get('/me', verifyToken, authController.getMe);
 
-// Protected - record logout event. Supabase token/session is revoked by the client SDK.
+// Public - exchange refresh token for new access token.
+router.post('/refresh',
+  authController.refresh
+);
+
+// Protected - record logout event and revoke refresh token when provided.
 router.post('/logout', verifyToken, authController.logout);
 
 module.exports = router;

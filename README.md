@@ -6,7 +6,7 @@ Backend ini dibangun di atas arsitektur Node.js dan Express, menggunakan ORM Pri
 
 ---
 
-## 🚀 Fitur Utama
+## Fitur Utama
 
 - **User Authentication (JWT):** Manajemen peran pengguna dengan hak akses (*Role-Based Access Control*) untuk Administrator, Kurikulum, Wali Kelas, Guru Mapel, dan Siswa.
 - **Master Data Management:** Pengelolaan data inti sekolah seperti Tahun Ajaran, Semester, Data Kelas, Mata Pelajaran, dan Guru.
@@ -58,7 +58,8 @@ DATABASE_URL="postgresql://user:password@localhost:5432/siakad_db?schema=public"
 
 # Konfigurasi Token Auth
 JWT_SECRET="rahasia_super_aman_anda"
-JWT_EXPIRES_IN="7d"
+ACCESS_TOKEN_EXPIRES_IN="1h"
+REFRESH_TOKEN_EXPIRES_DAYS=30
 
 # Konfigurasi Port Server
 PORT=3001
@@ -111,7 +112,7 @@ BE-SIAKAD/
 
 ---
 
-## 🚀 Perintah Tambahan (*Scripts*)
+## Perintah Tambahan (*Scripts*)
 
 - **Testing Unit:** `npm run test` (Menggunakan Jest)
 - **Reset DB:** `npx prisma migrate reset` (Berguna jika skema sangat berantakan di *development*)

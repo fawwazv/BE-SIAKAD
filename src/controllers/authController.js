@@ -6,6 +6,7 @@
 
 const prisma = require('../config/prisma');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { normalizeRoleName } = require('../middlewares/authMiddleware');
 const { writeSecurityEvent } = require('../utils/auditLogger');
 const { sendOtpEmail } = require('../utils/mailer');
@@ -22,6 +23,9 @@ const {
 
 const LOGIN_LOCK_THRESHOLD = Number.parseInt(process.env.LOGIN_LOCK_THRESHOLD || '5', 10);
 const LOGIN_LOCK_MINUTES = Number.parseInt(process.env.LOGIN_LOCK_MINUTES || '15', 10);
+const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || '1h';
+const REFRESH_TOKEN_EXPIRES_DAYS = Number.parseInt(process.env.REFRESH_TOKEN_EXPIRES_DAYS || '30', 10);
+const REFRESH_TOKEN_BYTES = Number.parseInt(process.env.REFRESH_TOKEN_BYTES || '48', 10);
 const OTP_PURPOSE_RESET_PASSWORD = 'RESET_PASSWORD';
 const GENERIC_RESET_MESSAGE = 'Jika akun ditemukan dan email pemulihan sudah terverifikasi, kode OTP akan dikirim.';
 const isProduction = () => process.env.APP_ENV === 'production';
@@ -52,6 +56,79 @@ const formatUser = (user) => ({
   personalEmailVerified: Boolean(user.profile?.personal_email_verified_at),
   password: '',
 });
+
+const getAccessTokenPayload = (user) => ({
+  userId: user.id,
+  role: user.role.nama_role,
+  email: user.email,
+  sessionVersion: user.session_version,
+});
+
+const getRefreshTokenExpiresAt = () => {
+  const ttlDays = Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0
+    ? REFRESH_TOKEN_EXPIRES_DAYS
+    : 30;
+  return new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
+};
+
+const generateRefreshToken = () => {
+  const bytes = Number.isInteger(REFRESH_TOKEN_BYTES) && REFRESH_TOKEN_BYTES >= 32
+    ? REFRESH_TOKEN_BYTES
+    : 48;
+  return crypto.randomBytes(bytes).toString('base64url');
+};
+
+const hashRefreshToken = (refreshToken) =>
+  crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+const getRequestMetadata = (req = {}) => {
+  const forwardedFor = `${req.headers?.['x-forwarded-for'] || ''}`.split(',')[0].trim();
+
+  return {
+    ipAddress: req.ip || forwardedFor || req.headers?.['x-real-ip'] || null,
+    userAgent: req.headers?.['user-agent'] || null,
+  };
+};
+
+const issueAccessToken = (user) =>
+  jwt.sign(
+    getAccessTokenPayload(user),
+    process.env.JWT_SECRET,
+    { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
+  );
+
+const createRefreshSession = async (user, refreshToken, req) => {
+  const { ipAddress, userAgent } = getRequestMetadata(req);
+
+  return prisma.userRefreshSession.create({
+    data: {
+      user_id: user.id,
+      token_hash: hashRefreshToken(refreshToken),
+      session_version: user.session_version,
+      expires_at: getRefreshTokenExpiresAt(),
+      ip_address: ipAddress,
+      user_agent: userAgent,
+    },
+  });
+};
+
+const revokeRefreshSessionByToken = async (refreshToken) => {
+  if (!refreshToken) return null;
+
+  const tokenHash = hashRefreshToken(refreshToken);
+  const session = await prisma.userRefreshSession.findFirst({
+    where: { token_hash: tokenHash },
+  });
+
+  if (!session || session.revoked_at) {
+    return null;
+  }
+
+  return prisma.userRefreshSession.update({
+    where: { id: session.id },
+    data: { revoked_at: new Date() },
+  });
+};
 
 const findUserByIdentifier = (identifier, includeProfile = false) =>
   prisma.user.findFirst({
@@ -177,27 +254,20 @@ const login = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        role: user.role.nama_role,
-        email: user.email,
-        sessionVersion: user.session_version,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
+    const token = issueAccessToken(user);
+    const refreshToken = generateRefreshToken();
 
-    if (prisma.user.update) {
-      await prisma.user.update({
+    await prisma.$transaction([
+      prisma.user.update({
         where: { id: user.id },
         data: {
           failed_login_count: 0,
           locked_until: null,
           last_login_at: new Date(),
         },
-      });
-    }
+      }),
+      createRefreshSession(user, refreshToken, req),
+    ]);
 
     await writeSecurityEvent({
       req,
@@ -210,10 +280,119 @@ const login = async (req, res) => {
       success: true,
       message: 'Login Berhasil',
       token,
+      accessToken: token,
+      refreshToken,
+      tokenType: 'Bearer',
+      expiresIn: ACCESS_TOKEN_EXPIRES_IN,
+      refreshTokenExpiresIn: `${Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0 ? REFRESH_TOKEN_EXPIRES_DAYS : 30}d`,
       user: formatUser(user),
     });
   } catch (error) {
     console.error('Auth Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Terjadi kesalahan internal pada server',
+      errorCode: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+};
+
+/**
+ * POST /api/auth/refresh
+ * Exchange a refresh token for a new access token and rotated refresh token.
+ */
+const refresh = async (req, res) => {
+  try {
+    const refreshToken = req.body.refreshToken || req.body.refresh_token;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Refresh token wajib diisi',
+        errorCode: 'BAD_REQUEST',
+      });
+    }
+
+    const tokenHash = hashRefreshToken(refreshToken);
+    const session = await prisma.userRefreshSession.findFirst({
+      where: { token_hash: tokenHash },
+      include: {
+        user: {
+          include: { role: true, profile: true },
+        },
+      },
+    });
+
+    if (!session || session.revoked_at || session.expires_at <= new Date()) {
+      return res.status(401).json({
+        success: false,
+        message: 'Refresh token tidak valid atau sudah kadaluarsa',
+        errorCode: 'INVALID_REFRESH_TOKEN',
+      });
+    }
+
+    if (!session.user || !session.user.status_aktif) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akun tidak aktif. Hubungi administrator.',
+        errorCode: 'INACTIVE_USER',
+      });
+    }
+
+    if (session.session_version !== session.user.session_version) {
+      await prisma.userRefreshSession.update({
+        where: { id: session.id },
+        data: { revoked_at: new Date() },
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Session sudah tidak berlaku. Silakan login kembali.',
+        errorCode: 'SESSION_REVOKED',
+      });
+    }
+
+    const newAccessToken = issueAccessToken(session.user);
+    const newRefreshToken = generateRefreshToken();
+
+    await prisma.$transaction([
+      prisma.userRefreshSession.update({
+        where: { id: session.id },
+        data: { revoked_at: new Date() },
+      }),
+      prisma.userRefreshSession.create({
+        data: {
+          user_id: session.user.id,
+          token_hash: hashRefreshToken(newRefreshToken),
+          session_version: session.user.session_version,
+          expires_at: getRefreshTokenExpiresAt(),
+          ...getRequestMetadata(req),
+        },
+      }),
+    ]);
+
+    await writeSecurityEvent({
+      req,
+      academicUserId: session.user.id,
+      event: 'TOKEN_REFRESHED',
+      metadata: {
+        refreshSessionId: session.id,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Token berhasil diperbarui',
+      token: newAccessToken,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      tokenType: 'Bearer',
+      expiresIn: ACCESS_TOKEN_EXPIRES_IN,
+      refreshTokenExpiresIn: `${Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0 ? REFRESH_TOKEN_EXPIRES_DAYS : 30}d`,
+      user: formatUser(session.user),
+    });
+  } catch (error) {
+    console.error('Refresh Error:', error);
     return res.status(500).json({
       success: false,
       message: 'Terjadi kesalahan internal pada server',
@@ -257,6 +436,10 @@ const getMe = async (req, res) => {
 };
 
 const logout = async (req, res) => {
+  const refreshToken = req.body?.refreshToken || req.body?.refresh_token || req.headers?.['x-refresh-token'];
+
+  await revokeRefreshSessionByToken(refreshToken);
+
   await writeSecurityEvent({
     req,
     event: 'LOGOUT',
@@ -267,7 +450,7 @@ const logout = async (req, res) => {
 
   return res.status(200).json({
     success: true,
-    message: 'Logout tercatat. Session Supabase harus diakhiri dari client.',
+    message: 'Logout tercatat. Refresh token telah dicabut bila tersedia.',
   });
 };
 
@@ -397,6 +580,10 @@ const confirmPasswordReset = async (req, res) => {
           locked_until: null,
         },
       }),
+      prisma.userRefreshSession.updateMany({
+        where: { user_id: user.id, revoked_at: null },
+        data: { revoked_at: new Date() },
+      }),
       prisma.userEmailOtp.update({
         where: { id: otpRecord.id },
         data: { consumed_at: new Date() },
@@ -424,4 +611,4 @@ const confirmPasswordReset = async (req, res) => {
   }
 };
 
-module.exports = { login, getMe, logout, requestPasswordReset, confirmPasswordReset };
+module.exports = { login, refresh, getMe, logout, requestPasswordReset, confirmPasswordReset };

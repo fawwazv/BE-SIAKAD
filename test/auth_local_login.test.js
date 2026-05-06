@@ -5,7 +5,15 @@ jest.mock('../src/config/prisma', () => ({
   user: {
     findFirst: jest.fn(),
     findUnique: jest.fn(),
+    update: jest.fn(),
   },
+  userRefreshSession: {
+    create: jest.fn(),
+  },
+  userSecurityEvent: {
+    create: jest.fn(),
+  },
+  $transaction: jest.fn((operations) => Promise.all(operations)),
 }));
 
 const prisma = require('../src/config/prisma');
@@ -35,6 +43,8 @@ describe('local dev auth login', () => {
       ...originalEnv,
       APP_ENV: 'development',
       JWT_SECRET: 'legacy-secret',
+      ACCESS_TOKEN_EXPIRES_IN: '1h',
+      REFRESH_TOKEN_EXPIRES_DAYS: '30',
     };
   });
 
@@ -52,13 +62,18 @@ describe('local dev auth login', () => {
       status_aktif: true,
       avatar_url: null,
       role: { nama_role: 'Administrator' },
+      session_version: 1,
+      profile: null,
     });
+    prisma.user.update.mockResolvedValue({});
+    prisma.userRefreshSession.create.mockResolvedValue({});
 
     const req = {
       body: {
         email: 'admin@siakad.sch.id',
         password: 'password123',
       },
+      headers: {},
     };
     const res = mockRes();
 
@@ -72,11 +87,19 @@ describe('local dev auth login', () => {
         email: 'admin@siakad.sch.id',
         role: 'admin',
       },
+      tokenType: 'Bearer',
+      expiresIn: '1h',
+      refreshTokenExpiresIn: '30d',
     });
+    expect(typeof res.body.refreshToken).toBe('string');
+    expect(res.body.refreshToken).toHaveLength(64);
+
     expect(jwt.verify(res.body.token, process.env.JWT_SECRET)).toMatchObject({
       userId: 'user-001',
       role: 'Administrator',
     });
+    const decoded = jwt.decode(res.body.token);
+    expect(decoded.exp - decoded.iat).toBe(3600);
   });
 
   test('rejects local login in production unless explicitly enabled', async () => {
@@ -88,6 +111,7 @@ describe('local dev auth login', () => {
         email: 'admin@siakad.sch.id',
         password: 'password123',
       },
+      headers: {},
     };
     const res = mockRes();
 
@@ -97,4 +121,3 @@ describe('local dev auth login', () => {
     expect(res.body).toMatchObject({ errorCode: 'LOCAL_LOGIN_DISABLED' });
   });
 });
-

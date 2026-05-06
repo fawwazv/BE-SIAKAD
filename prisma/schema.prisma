@@ -48,6 +48,7 @@ model User {
   audit_logs    AuditLog[] @relation("AuditActorUser")
   security_events UserSecurityEvent[] @relation("SecurityEventUser")
   email_otps    UserEmailOtp[]
+  refresh_sessions UserRefreshSession[]
 
   // Relasi guru
   guru_mapel       GuruMapel[]
@@ -115,6 +116,27 @@ model UserEmailOtp {
   @@index([purpose])
   @@index([expires_at])
   @@map("user_email_otps")
+}
+
+// ─── USER REFRESH SESSIONS ─────────────────────
+model UserRefreshSession {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id         String
+  token_hash      String   @unique
+  session_version Int
+  expires_at      DateTime
+  revoked_at      DateTime?
+  user_agent      String?
+  ip_address      String?
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([expires_at])
+  @@index([revoked_at])
+  @@map("user_refresh_sessions")
 }
 
 // ─── AUDIT LOG ────────────────────────────────
