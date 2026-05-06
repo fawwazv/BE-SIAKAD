@@ -71,6 +71,11 @@ const getRefreshTokenExpiresAt = () => {
   return new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
 };
 
+const getRefreshTokenTtlDays = () =>
+  Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0
+    ? REFRESH_TOKEN_EXPIRES_DAYS
+    : 30;
+
 const generateRefreshToken = () => {
   const bytes = Number.isInteger(REFRESH_TOKEN_BYTES) && REFRESH_TOKEN_BYTES >= 32
     ? REFRESH_TOKEN_BYTES
@@ -85,8 +90,8 @@ const getRequestMetadata = (req = {}) => {
   const forwardedFor = `${req.headers?.['x-forwarded-for'] || ''}`.split(',')[0].trim();
 
   return {
-    ipAddress: req.ip || forwardedFor || req.headers?.['x-real-ip'] || null,
-    userAgent: req.headers?.['user-agent'] || null,
+    ip_address: req.ip || forwardedFor || req.headers?.['x-real-ip'] || null,
+    user_agent: req.headers?.['user-agent'] || null,
   };
 };
 
@@ -97,20 +102,13 @@ const issueAccessToken = (user) =>
     { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
   );
 
-const createRefreshSession = async (user, refreshToken, req) => {
-  const { ipAddress, userAgent } = getRequestMetadata(req);
-
-  return prisma.userRefreshSession.create({
-    data: {
-      user_id: user.id,
-      token_hash: hashRefreshToken(refreshToken),
-      session_version: user.session_version,
-      expires_at: getRefreshTokenExpiresAt(),
-      ip_address: ipAddress,
-      user_agent: userAgent,
-    },
-  });
-};
+const createRefreshSessionData = (user, refreshToken, req) => ({
+  user_id: user.id,
+  token_hash: hashRefreshToken(refreshToken),
+  session_version: user.session_version,
+  expires_at: getRefreshTokenExpiresAt(),
+  ...getRequestMetadata(req),
+});
 
 const revokeRefreshSessionByToken = async (refreshToken) => {
   if (!refreshToken) return null;
@@ -257,17 +255,20 @@ const login = async (req, res) => {
     const token = issueAccessToken(user);
     const refreshToken = generateRefreshToken();
 
-    await prisma.$transaction([
-      prisma.user.update({
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
         where: { id: user.id },
         data: {
           failed_login_count: 0,
           locked_until: null,
           last_login_at: new Date(),
         },
-      }),
-      createRefreshSession(user, refreshToken, req),
-    ]);
+      });
+
+      await tx.userRefreshSession.create({
+        data: createRefreshSessionData(user, refreshToken, req),
+      });
+    });
 
     await writeSecurityEvent({
       req,
@@ -284,7 +285,7 @@ const login = async (req, res) => {
       refreshToken,
       tokenType: 'Bearer',
       expiresIn: ACCESS_TOKEN_EXPIRES_IN,
-      refreshTokenExpiresIn: `${Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0 ? REFRESH_TOKEN_EXPIRES_DAYS : 30}d`,
+      refreshTokenExpiresIn: `${getRefreshTokenTtlDays()}d`,
       user: formatUser(user),
     });
   } catch (error) {
@@ -355,21 +356,16 @@ const refresh = async (req, res) => {
     const newAccessToken = issueAccessToken(session.user);
     const newRefreshToken = generateRefreshToken();
 
-    await prisma.$transaction([
-      prisma.userRefreshSession.update({
+    await prisma.$transaction(async (tx) => {
+      await tx.userRefreshSession.update({
         where: { id: session.id },
         data: { revoked_at: new Date() },
-      }),
-      prisma.userRefreshSession.create({
-        data: {
-          user_id: session.user.id,
-          token_hash: hashRefreshToken(newRefreshToken),
-          session_version: session.user.session_version,
-          expires_at: getRefreshTokenExpiresAt(),
-          ...getRequestMetadata(req),
-        },
-      }),
-    ]);
+      });
+
+      await tx.userRefreshSession.create({
+        data: createRefreshSessionData(session.user, newRefreshToken, req),
+      });
+    });
 
     await writeSecurityEvent({
       req,
@@ -388,7 +384,7 @@ const refresh = async (req, res) => {
       refreshToken: newRefreshToken,
       tokenType: 'Bearer',
       expiresIn: ACCESS_TOKEN_EXPIRES_IN,
-      refreshTokenExpiresIn: `${Number.isInteger(REFRESH_TOKEN_EXPIRES_DAYS) && REFRESH_TOKEN_EXPIRES_DAYS > 0 ? REFRESH_TOKEN_EXPIRES_DAYS : 30}d`,
+      refreshTokenExpiresIn: `${getRefreshTokenTtlDays()}d`,
       user: formatUser(session.user),
     });
   } catch (error) {

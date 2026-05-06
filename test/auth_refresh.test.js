@@ -1,23 +1,31 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
-jest.mock('../src/config/prisma', () => ({
-  user: {
-    findFirst: jest.fn(),
-    findUnique: jest.fn(),
-    update: jest.fn(),
-  },
-  userRefreshSession: {
-    findFirst: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    updateMany: jest.fn(),
-  },
-  userSecurityEvent: {
-    create: jest.fn(),
-  },
-  $transaction: jest.fn((operations) => Promise.all(operations)),
-}));
+jest.mock('../src/config/prisma', () => {
+  const mockPrisma = {
+    user: {
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
+    userRefreshSession: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    userSecurityEvent: {
+      create: jest.fn(),
+    },
+  };
+
+  mockPrisma.$transaction = jest.fn((operations) => {
+    if (typeof operations === 'function') return operations(mockPrisma);
+    return Promise.all(operations);
+  });
+
+  return mockPrisma;
+});
 
 const prisma = require('../src/config/prisma');
 const authController = require('../src/controllers/authController');
